@@ -56,6 +56,10 @@ uv run issue-to-patch search "add() returns the wrong result" \
 uv run issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl
 ```
 
+> The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
+> old DB errors with `no such column`, run `make reset-db` and re-index (or
+> `make migrate` if you know the DB is only one revision behind).
+
 ## Layout
 
 | Path | Role |

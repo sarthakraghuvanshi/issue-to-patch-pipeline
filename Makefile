@@ -34,8 +34,11 @@ test: ## Run the test suite with coverage
 
 check: lint type test ## Everything CI runs
 
-migrate: ## Apply database migrations (added in Sprint 1)
+migrate: ## Apply database migrations
 	uv run alembic upgrade head
+
+reset-db: ## Delete the local SQLite DB (dev only; re-index afterwards)
+	rm -f artifacts/dev.db artifacts/*.db
 
 run-cli: ## Run the CLI, e.g. `make run-cli ARGS="version"`
 	uv run issue-to-patch $(ARGS)
