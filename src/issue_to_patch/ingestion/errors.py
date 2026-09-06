@@ -25,3 +25,23 @@ class InvalidIssueNumber(IngestionError):
 
 class UnsafeGitInvocation(IngestionError):
     """A Git command or path was rejected by the safety wrapper."""
+
+
+class GitHubAPIError(IngestionError):
+    """The GitHub API returned an error we did not recover from."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GitHubNotFound(GitHubAPIError):
+    """A repository, issue, or resource does not exist (HTTP 404)."""
+
+
+class GitHubRateLimited(GitHubAPIError):
+    """Rate limit hit and not cleared within the retry budget."""
+
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message, status_code=429)
+        self.retry_after_seconds = retry_after_seconds

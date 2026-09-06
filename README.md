@@ -13,7 +13,8 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 
 - [x] Bootstrap (IMPLEMENTATION_PLAN.md §2)
 - [x] Sprint 1 — deterministic issue → validated `.patch`, no LLM, no network
-- [ ] Sprint 2 — GitHub ingestion
+- [x] Sprint 2 — GitHub ingestion (async client, retries, pagination, ETag cache; raw archive + snapshot)
+- [ ] Sprint 3 — parsing / structure-aware chunking / metadata
 
 ## Quickstart
 
@@ -35,6 +36,14 @@ make up           # local infra: postgres+pgvector, redis, langfuse, minio
 
 An **edit plan** is JSON: `{"message": "...", "edits": [{"path": "...", "old": "...", "new": "..."}]}`.
 `old` must match exactly once; `old: ""` on a missing file creates it.
+
+```bash
+# Sprint 2: fetch a real GitHub issue + repo into artifacts/<run_id>/
+export ITP_GITHUB_TOKEN=ghp_xxx        # optional; anonymous works within rate limits
+uv run issue-to-patch ingest --issue-url https://github.com/OWNER/REPO/issues/123
+# writes raw/*.json (issue, comments, repo, related changes, snapshot manifest)
+# + snapshot/ pinned to a commit SHA
+```
 
 ## Layout
 

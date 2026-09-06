@@ -1,7 +1,7 @@
 """Command-line entrypoint.
 
-Only ``version`` and ``config`` are wired up at bootstrap. Feature commands
-(``run``, ``ingest``, ``index``, ``search``, ``review``) land in their sprints.
+Wired up so far: ``version``, ``config`` (bootstrap), ``run`` (Sprint 1),
+``ingest`` (Sprint 2). ``index``, ``search``, ``review`` land in later sprints.
 """
 
 from __future__ import annotations
@@ -78,6 +78,55 @@ def run(
             typer.echo(f"  [{check.status.value:>4}] {check.name} {check.detail}".rstrip())
     typer.echo(f"artifacts:     {result.run_dir}")
     raise typer.Exit(_EXIT_CODES[result.state])
+
+
+@app.command()
+def ingest(
+    issue_url: Annotated[str, typer.Option(help="GitHub issue URL or owner/repo#n")],
+    token: Annotated[
+        str | None, typer.Option(help="GitHub token (else ITP_GITHUB_TOKEN, else anonymous)")
+    ] = None,
+    repo_source: Annotated[
+        str | None,
+        typer.Option(help="Override the clone source (local path or URL); default = clone_url"),
+    ] = None,
+    ref: Annotated[
+        str | None, typer.Option(help="Branch, tag, or SHA to pin; default = repo default branch")
+    ] = None,
+) -> None:
+    """Fetch a GitHub issue + its repo into a raw artifact set and a pinned snapshot."""
+    import asyncio
+    import uuid
+
+    from issue_to_patch.ingestion.github import GitHubClient
+    from issue_to_patch.ingestion.ingest import ingest_issue
+    from issue_to_patch.logging import bind_run_id
+
+    settings = get_settings()
+    run_id = uuid.uuid4().hex[:16]
+    run_dir = settings.artifacts_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    resolved_token = token or (
+        settings.github_token.get_secret_value() if settings.github_token else None
+    )
+
+    async def _go() -> None:
+        async with GitHubClient(token=resolved_token, base_url=settings.github_api_base) as client:
+            result = await ingest_issue(
+                issue_url, run_dir, client=client, repo_source=repo_source, ref=ref
+            )
+        issue = result.conversation.issue
+        typer.echo(f"run_id:         {run_id}")
+        typer.echo(f"repo:           {result.repository.full_name}")
+        typer.echo(f"issue:          #{issue.number} {issue.title}")
+        typer.echo(f"comments:       {len(result.conversation.comments)}")
+        typer.echo(f"related:        {len(result.related_changes)}")
+        typer.echo(f"attachments:    {len(result.attachment_urls)}")
+        typer.echo(f"commit_sha:     {result.snapshot.commit_sha}")
+        typer.echo(f"raw artifacts:  {len(result.raw_records)} in {run_dir / 'raw'}")
+
+    with bind_run_id(run_id):
+        asyncio.run(_go())
 
 
 if __name__ == "__main__":
