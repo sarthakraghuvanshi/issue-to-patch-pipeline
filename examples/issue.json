@@ -1,0 +1,7 @@
+{
+  "repo": "acme/calculator",
+  "number": 1,
+  "title": "add() returns the wrong result",
+  "body": "Calling add(2, 3) returns -1 instead of 5. It looks like the function subtracts.",
+  "labels": ["bug"]
+}

@@ -1,0 +1,10 @@
+{
+  "message": "fix: add() should sum its arguments, not subtract",
+  "edits": [
+    {
+      "path": "calculator.py",
+      "old": "    return a - b  # BUG: should be a + b",
+      "new": "    return a + b"
+    }
+  ]
+}

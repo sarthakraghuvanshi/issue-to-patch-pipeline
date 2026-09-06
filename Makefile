@@ -43,5 +43,8 @@ run-cli: ## Run the CLI, e.g. `make run-cli ARGS="version"`
 serve: ## Run the API locally (added in Sprint 6)
 	uv run uvicorn issue_to_patch.api.app:app --reload
 
+demo: ## Sprint 1 hands-on: build a buggy repo and fix it end to end
+	bash examples/try_sprint1.sh
+
 clean: ## Remove caches and local run output
 	rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov .coverage artifacts/*.db
