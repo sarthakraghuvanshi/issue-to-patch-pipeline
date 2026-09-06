@@ -35,7 +35,7 @@ from issue_to_patch.ingestion.models import (
 )
 from issue_to_patch.ingestion.normalize import normalize_issue
 from issue_to_patch.ingestion.raw_store import RawArtifactRecord, RawArtifactWriter, redact_secrets
-from issue_to_patch.ingestion.snapshot import create_snapshot, discard_snapshot
+from issue_to_patch.ingestion.snapshot import create_snapshot, discard_snapshot, load_snapshot
 
 __all__ = [
     "GitHubAPIError",
@@ -68,6 +68,7 @@ __all__ = [
     "fetch_issue_conversation",
     "fetch_repository_metadata",
     "ingest_issue",
+    "load_snapshot",
     "normalize_issue",
     "redact_secrets",
     "stable_hash",

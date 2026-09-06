@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from issue_to_patch.ingestion.models import stable_hash
-from issue_to_patch.persistence.models import Artifact, Base, Run, ToolCall
+from issue_to_patch.persistence.models import Artifact, Base, ChunkRow, Run, ToolCall
 
 _GENESIS_HASH = "0" * 64
 
@@ -157,3 +157,31 @@ class Store:
         with self.session() as session:
             run = session.get(Run, run_id)
             return None if run is None else run.state
+
+    # -- chunks ---------------------------------------------------
+    def replace_chunks(
+        self, repository: str, commit_sha: str, rows: list[dict[str, object]]
+    ) -> int:
+        """Wipe any existing chunks for this repo@sha, then insert ``rows``.
+
+        Re-indexing the same commit is therefore idempotent (Phase 2 exit
+        criterion), and retrieval never mixes two commits.
+        """
+        with self.session() as session:
+            session.query(ChunkRow).filter(
+                ChunkRow.repository == repository, ChunkRow.commit_sha == commit_sha
+            ).delete(synchronize_session=False)
+            session.bulk_insert_mappings(ChunkRow, rows)
+            return len(rows)
+
+    def get_chunk(self, chunk_id: str) -> ChunkRow | None:
+        with self.session() as session:
+            return session.get(ChunkRow, chunk_id)
+
+    def count_chunks(self, repository: str, commit_sha: str) -> int:
+        with self.session() as session:
+            return (
+                session.query(ChunkRow)
+                .filter(ChunkRow.repository == repository, ChunkRow.commit_sha == commit_sha)
+                .count()
+            )

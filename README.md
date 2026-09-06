@@ -14,7 +14,8 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 - [x] Bootstrap (IMPLEMENTATION_PLAN.md §2)
 - [x] Sprint 1 — deterministic issue → validated `.patch`, no LLM, no network
 - [x] Sprint 2 — GitHub ingestion (async client, retries, pagination, ETag cache; raw archive + snapshot)
-- [ ] Sprint 3 — parsing / structure-aware chunking / metadata
+- [x] Sprint 3 — structure-aware chunking (tree-sitter) + rule-based metadata; `index` / `show-chunk`
+- [ ] Sprint 4 — BM25 retrieval, then hybrid
 
 ## Quickstart
 
@@ -43,6 +44,10 @@ export ITP_GITHUB_TOKEN=ghp_xxx        # optional; anonymous works within rate l
 uv run issue-to-patch ingest --issue-url https://github.com/OWNER/REPO/issues/123
 # writes raw/*.json (issue, comments, repo, related changes, snapshot manifest)
 # + snapshot/ pinned to a commit SHA
+
+# Sprint 3: chunk a snapshot into structure-aware pieces + metadata
+uv run issue-to-patch index --snapshot artifacts/<run_id>/snapshot
+uv run issue-to-patch show-chunk <chunk_id> --metadata   # source, byte-identical to the file
 ```
 
 ## Layout

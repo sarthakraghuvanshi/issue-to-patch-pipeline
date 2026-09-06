@@ -52,6 +52,45 @@ def fixture_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def indexable_repo(tmp_path: Path) -> Path:
+    """A small multi-file repo (package + tests + docs + config) for indexing."""
+    repo = tmp_path / "sample-lib"
+    (repo / "src" / "sample").mkdir(parents=True)
+    (repo / "tests").mkdir()
+
+    (repo / "src" / "sample" / "__init__.py").write_text("", "utf-8")
+    (repo / "src" / "sample" / "parser.py").write_text(
+        '"""Parse things."""\n\n'
+        "import re\n\n\n"
+        "def parse_issue_url(raw_url):\n"
+        "    return raw_url.strip()\n\n\n"
+        "class Parser:\n"
+        '    """A parser."""\n\n'
+        "    def parse(self, text):\n"
+        "        return text.split()\n\n"
+        "    def validate(self, text):\n"
+        "        return bool(text)\n",
+        "utf-8",
+    )
+    (repo / "tests" / "test_parser.py").write_text(
+        "from sample.parser import parse_issue_url\n\n\n"
+        "def test_parse_issue_url():\n"
+        "    assert parse_issue_url(' x ') == 'x'\n",
+        "utf-8",
+    )
+    (repo / "README.md").write_text(
+        "# Sample Lib\n\nIntro.\n\n## Usage\n\nCall parse.\n\n## License\n\nMIT.\n", "utf-8"
+    )
+    (repo / "config.yaml").write_text("name: sample\nversion: 1\n", "utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname = 'sample'\n", "utf-8")
+
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "initial")
+    return repo
+
+
+@pytest.fixture
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from issue_to_patch.config import get_settings
     from issue_to_patch.config.settings import Settings

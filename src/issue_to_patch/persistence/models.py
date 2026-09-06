@@ -11,6 +11,7 @@ from datetime import datetime
 
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
 
 
 class Base(DeclarativeBase):
@@ -55,6 +56,35 @@ class ToolCall(Base):
     row_hash: Mapped[str] = mapped_column(String(64))
 
     run: Mapped[Run] = relationship(back_populates="tool_calls")
+
+
+class ChunkRow(Base):
+    """One indexed, structure-aware slice of a repository file at a commit.
+
+    The ``embedding`` column is added in Sprint 4 (vector retrieval).
+    """
+
+    __tablename__ = "chunks"
+    __table_args__ = (
+        UniqueConstraint("repository", "commit_sha", "chunk_id", name="uq_chunk_identity"),
+    )
+
+    chunk_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    repository: Mapped[str] = mapped_column(String(255), index=True)
+    commit_sha: Mapped[str] = mapped_column(String(64), index=True)
+    path: Mapped[str] = mapped_column(Text, index=True)
+    language: Mapped[str] = mapped_column(String(24))
+    kind: Mapped[str] = mapped_column(String(24))
+    symbol: Mapped[str | None] = mapped_column(String(512))
+    line_start: Mapped[int] = mapped_column(Integer)
+    line_end: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    parent_chunk_id: Mapped[str | None] = mapped_column(String(32))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
+    questions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reference_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class Artifact(Base):

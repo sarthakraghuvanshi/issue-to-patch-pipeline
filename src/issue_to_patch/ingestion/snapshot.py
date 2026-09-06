@@ -86,3 +86,24 @@ def _as_local_path(source: str) -> Path | None:
 def discard_snapshot(snapshot: RepositorySnapshot) -> None:
     """Delete the cloned working copy (keep the manifest next to it)."""
     shutil.rmtree(snapshot.root_path, ignore_errors=True)
+
+
+def load_snapshot(snapshot_dir: Path) -> RepositorySnapshot:
+    """Rebuild a :class:`RepositorySnapshot` from an on-disk snapshot directory."""
+    snapshot_dir = Path(snapshot_dir)
+    manifest_path = snapshot_dir / MANIFEST_NAME
+    if not manifest_path.exists():
+        raise RepositoryNotFound(f"no {MANIFEST_NAME} in {snapshot_dir}")
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    repo_path = snapshot_dir / "repo"
+    if not (repo_path / ".git").exists():
+        raise RepositoryNotFound(f"no cloned repo at {repo_path}")
+    return RepositorySnapshot(
+        repo=manifest.get("repo"),
+        source=manifest["source"],
+        commit_sha=manifest["commit_sha"],
+        tree_hash=manifest["tree_hash"],
+        root_path=repo_path,
+        file_count=int(manifest.get("file_count", 0)),
+        created_at=datetime.fromisoformat(manifest["created_at"]),
+    )

@@ -129,5 +129,54 @@ def ingest(
         asyncio.run(_go())
 
 
+@app.command()
+def index(
+    snapshot: Annotated[
+        Path, typer.Option(help="Snapshot directory (contains repo/ and snapshot_manifest.json)")
+    ],
+    max_lines: Annotated[int, typer.Option(help="Max lines before a big class is split")] = 200,
+) -> None:
+    """Parse a snapshot into structure-aware chunks and store them."""
+    from issue_to_patch.ingestion.snapshot import load_snapshot
+    from issue_to_patch.persistence import Store
+    from issue_to_patch.processing import index_snapshot
+
+    settings = get_settings()
+    snap = load_snapshot(snapshot)
+    store = Store(settings.database_url)
+    store.create_all()
+    result = index_snapshot(snap, store, max_lines=max_lines, out_dir=Path(snapshot).parent)
+
+    typer.echo(f"repository:     {result.repository}")
+    typer.echo(f"commit_sha:     {result.commit_sha}")
+    typer.echo(f"files seen:     {result.files_seen}")
+    typer.echo(f"files indexed:  {result.files_indexed}")
+    typer.echo(f"files skipped:  {result.files_skipped}")
+    typer.echo(f"chunks written: {result.chunks_written}")
+    typer.echo(f"chunks.jsonl:   {Path(snapshot).parent / 'chunks.jsonl'}")
+
+
+@app.command("show-chunk")
+def show_chunk(
+    chunk_id: Annotated[str, typer.Argument(help="Chunk id from `index` output / chunks.jsonl")],
+    metadata: Annotated[bool, typer.Option(help="Also print summary/keywords/questions")] = False,
+) -> None:
+    """Print the stored source for one chunk (byte-identical to the file)."""
+    from issue_to_patch.persistence import Store
+
+    row = Store(get_settings().database_url).get_chunk(chunk_id)
+    if row is None:
+        typer.echo(f"no chunk {chunk_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"# {row.path}:{row.line_start}-{row.line_end}  ({row.kind}  symbol={row.symbol})")
+    if metadata:
+        typer.echo(f"# summary:   {row.summary}")
+        typer.echo(f"# keywords:  {', '.join(row.keywords)}")
+        typer.echo(f"# questions: {' | '.join(row.questions)}")
+        typer.echo(f"# refs:      {', '.join(row.reference_paths)}")
+    typer.echo("-" * 72)
+    typer.echo(row.content)
+
+
 if __name__ == "__main__":
     app()
