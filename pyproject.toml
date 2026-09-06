@@ -65,7 +65,10 @@ select = [
     "PTH",              # use pathlib
     "RUF",
 ]
-ignore = ["A003"]  # class attribute shadowing a builtin is fine for pydantic models
+ignore = [
+    "A003",   # class attribute shadowing a builtin is fine for pydantic models
+    "N818",   # domain exceptions read better without a forced "Error" suffix
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]

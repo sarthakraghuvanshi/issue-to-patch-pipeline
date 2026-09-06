@@ -11,17 +11,30 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 
 ## Status
 
-Bootstrap complete (IMPLEMENTATION_PLAN.md §2). Feature sprints not started.
+- [x] Bootstrap (IMPLEMENTATION_PLAN.md §2)
+- [x] Sprint 1 — deterministic issue → validated `.patch`, no LLM, no network
+- [ ] Sprint 2 — GitHub ingestion
 
 ## Quickstart
 
 ```bash
 make install      # uv sync + Python 3.12
 make check        # ruff + mypy + pytest (offline, fake LLM)
-make run-cli ARGS="version"
-make run-cli ARGS="config"     # effective settings, secrets redacted
+make migrate      # create the SQLite schema via Alembic
+
+# Sprint 1: fix a bug deterministically from an issue + repo + edit plan
+uv run issue-to-patch run \
+  --issue path/to/issue.json \
+  --repo  path/to/local/repo \
+  --edit-plan path/to/plan.json \
+  --scope 'src/**'
+# exit code: 0 validated · 10 needs-human · 20 rejected · 30 inconclusive
+
 make up           # local infra: postgres+pgvector, redis, langfuse, minio
 ```
+
+An **edit plan** is JSON: `{"message": "...", "edits": [{"path": "...", "old": "...", "new": "..."}]}`.
+`old` must match exactly once; `old: ""` on a missing file creates it.
 
 ## Layout
 
