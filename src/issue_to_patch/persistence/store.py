@@ -178,6 +178,25 @@ class Store:
         with self.session() as session:
             return session.get(ChunkRow, chunk_id)
 
+    def list_chunks(self, repository: str, commit_sha: str) -> list[ChunkRow]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(ChunkRow)
+                .where(ChunkRow.repository == repository, ChunkRow.commit_sha == commit_sha)
+                .order_by(ChunkRow.path, ChunkRow.line_start)
+            ).all()
+            for row in rows:
+                session.expunge(row)
+            return list(rows)
+
+    def set_embeddings(self, embeddings: dict[str, list[float]]) -> int:
+        with self.session() as session:
+            for chunk_id, vector in embeddings.items():
+                row = session.get(ChunkRow, chunk_id)
+                if row is not None:
+                    row.embedding = vector
+            return len(embeddings)
+
     def count_chunks(self, repository: str, commit_sha: str) -> int:
         with self.session() as session:
             return (

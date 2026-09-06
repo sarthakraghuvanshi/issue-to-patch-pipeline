@@ -15,7 +15,8 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 - [x] Sprint 1 — deterministic issue → validated `.patch`, no LLM, no network
 - [x] Sprint 2 — GitHub ingestion (async client, retries, pagination, ETag cache; raw archive + snapshot)
 - [x] Sprint 3 — structure-aware chunking (tree-sitter) + rule-based metadata; `index` / `show-chunk`
-- [ ] Sprint 4 — BM25 retrieval, then hybrid
+- [x] Sprint 4 — BM25 + dense (hashing embedder) + hybrid (RRF) retrieval; `search` / `eval-retrieval`
+- [ ] Sprint 5 — single-agent LangGraph reasoning engine
 
 ## Quickstart
 
@@ -48,6 +49,11 @@ uv run issue-to-patch ingest --issue-url https://github.com/OWNER/REPO/issues/12
 # Sprint 3: chunk a snapshot into structure-aware pieces + metadata
 uv run issue-to-patch index --snapshot artifacts/<run_id>/snapshot
 uv run issue-to-patch show-chunk <chunk_id> --metadata   # source, byte-identical to the file
+
+# Sprint 4: rank indexed chunks against a bug description
+uv run issue-to-patch search "add() returns the wrong result" \
+  --snapshot artifacts/<run_id>/snapshot --mode hybrid --explain
+uv run issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl
 ```
 
 ## Layout

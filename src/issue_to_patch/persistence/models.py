@@ -85,6 +85,8 @@ class ChunkRow(Base):
     keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
     questions: Mapped[list[str]] = mapped_column(JSON, default=list)
     reference_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Dense embedding (Sprint 4). JSON list here; a pgvector column in prod.
+    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
 
 
 class Artifact(Base):

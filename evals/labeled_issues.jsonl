@@ -1,0 +1,1 @@
+{"issue_id": "example-1", "repository": "acme/sample", "commit_sha": "REPLACE_WITH_INDEXED_SHA", "query": "parse_issue_url does not strip surrounding whitespace", "labels": ["bug"], "gold_files": ["src/sample/parser.py"], "gold_symbols": ["parse_issue_url"]}

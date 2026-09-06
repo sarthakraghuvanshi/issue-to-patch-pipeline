@@ -16,7 +16,8 @@ from pathlib import Path, PurePosixPath
 from issue_to_patch.ingestion.git_ops import SafeGit
 from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.logging import get_logger
-from issue_to_patch.persistence import Store
+from issue_to_patch.persistence import HashingEmbedder, Store
+from issue_to_patch.persistence.vector import Embedder
 from issue_to_patch.processing.chunker import DEFAULT_MAX_LINES, StructureAwareChunker
 from issue_to_patch.processing.metadata import MetadataEnricher
 from issue_to_patch.processing.models import Chunk, IndexResult, Language
@@ -52,6 +53,7 @@ def index_snapshot(
     *,
     max_lines: int = DEFAULT_MAX_LINES,
     out_dir: Path | None = None,
+    embedder: Embedder | None = None,
 ) -> IndexResult:
     repo_path = snapshot.root_path
     repository = snapshot.repo or repo_path.name
@@ -63,6 +65,7 @@ def index_snapshot(
     analyzer = StructureAnalyzer()
     chunker = StructureAwareChunker(max_lines=max_lines)
     enricher = MetadataEnricher()
+    embedder = embedder or HashingEmbedder()
 
     candidates = [p for p in tracked if _should_index(p)]
     test_index = _build_test_index(repo_path, candidates)
@@ -92,7 +95,7 @@ def index_snapshot(
     written = store.replace_chunks(
         repository,
         snapshot.commit_sha,
-        [_row(c) for c in all_chunks],
+        [_row(c, embedder) for c in all_chunks],
     )
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +141,11 @@ def _build_test_index(repo_path: Path, candidates: list[str]) -> dict[str, list[
     return index
 
 
-def _row(chunk: Chunk) -> dict[str, object]:
+def _row(chunk: Chunk, embedder: Embedder) -> dict[str, object]:
     data: dict[str, object] = json.loads(chunk.model_dump_json())
     data["reference_paths"] = data.pop("references")
+    embed_text = "\n".join(
+        [chunk.path, chunk.symbol or "", chunk.summary, " ".join(chunk.keywords), chunk.content]
+    )
+    data["embedding"] = embedder.embed(embed_text)
     return data

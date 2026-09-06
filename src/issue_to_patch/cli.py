@@ -178,5 +178,72 @@ def show_chunk(
     typer.echo(row.content)
 
 
+@app.command()
+def search(
+    query: Annotated[str, typer.Argument(help="Issue text / bug description to search for")],
+    snapshot: Annotated[
+        Path | None, typer.Option(help="Snapshot dir (reads repo + sha from its manifest)")
+    ] = None,
+    repo: Annotated[str | None, typer.Option(help="owner/name (if not using --snapshot)")] = None,
+    sha: Annotated[str | None, typer.Option(help="commit SHA (if not using --snapshot)")] = None,
+    mode: Annotated[str, typer.Option(help="bm25 | dense | hybrid")] = "hybrid",
+    top_k: Annotated[int, typer.Option(help="How many results")] = 10,
+    explain: Annotated[bool, typer.Option(help="Show per-term BM25 contributions")] = False,
+) -> None:
+    """Rank indexed chunks against a query. Shows scores; --explain shows why."""
+    from issue_to_patch.ingestion.snapshot import load_snapshot
+    from issue_to_patch.persistence import Store
+    from issue_to_patch.retrieval import RetrievalMode, RetrievalService, SearchFilters
+
+    if snapshot is not None:
+        snap = load_snapshot(snapshot)
+        repo, sha = snap.repo, snap.commit_sha
+    if not repo or not sha:
+        typer.echo("give --snapshot, or both --repo and --sha", err=True)
+        raise typer.Exit(2)
+
+    service = RetrievalService(Store(get_settings().database_url))
+    trace = service.search(
+        query,
+        SearchFilters(repository=repo, commit_sha=sha),
+        top_k=top_k,
+        mode=RetrievalMode(mode),
+    )
+    typer.echo(
+        f"mode={trace.mode.value}  candidates={trace.candidates_considered}  "
+        f"terms={len(trace.expanded_terms)}"
+    )
+    for r in trace.results:
+        tag = " [parent-context]" if r.added_as_parent_context else ""
+        typer.echo(
+            f"  {r.rank:>2}. {r.score:>7.4f}  {r.path}:{r.line_start}-{r.line_end}  "
+            f"{r.symbol or r.kind}{tag}"
+        )
+        if explain and r.chunk_id in trace.term_contributions:
+            top_terms = trace.term_contributions[r.chunk_id][:5]
+            typer.echo(
+                "        " + ", ".join(f"{c.term}(tf={c.tf}, +{c.contribution})" for c in top_terms)
+            )
+
+
+@app.command("eval-retrieval")
+def eval_retrieval(
+    labeled: Annotated[Path, typer.Option(help="Path to labeled_issues.jsonl")],
+    top_k: Annotated[int, typer.Option(help="Cutoff for retrieval")] = 10,
+) -> None:
+    """Score BM25 vs dense vs hybrid on labeled issue->file examples."""
+    from issue_to_patch.persistence import Store
+    from issue_to_patch.retrieval import RetrievalService, evaluate, load_labeled_issues
+    from issue_to_patch.retrieval.evaluation import render_report
+
+    issues = load_labeled_issues(labeled)
+    if not issues:
+        typer.echo("no labeled issues found", err=True)
+        raise typer.Exit(2)
+    service = RetrievalService(Store(get_settings().database_url))
+    report = evaluate(service, issues, top_k=top_k)
+    typer.echo(render_report(report))
+
+
 if __name__ == "__main__":
     app()
