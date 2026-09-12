@@ -19,6 +19,16 @@ default serializer will happily round-trip them but refuses to do so silently
 in a future version unless the exact (module, class) pairs are allowlisted —
 so we allowlist our own state models explicitly here instead of turning that
 check off wholesale.
+
+That allowlist has to be built into the serializer's *constructor*, not
+added after the fact with ``.with_allowlist(...)``: both ``MemorySaver()``
+and ``SqliteSaver()`` default to an already-maximally-permissive allowlist
+(``True`` — allow anything, just warn), and ``.with_allowlist()`` only ever
+*adds* entries to whatever allowlist is already there. Adding entries to
+"already allows everything" is a no-op, so calling it on a fresh saver
+silently keeps the permissive default instead of tightening it — which is
+exactly what this module did for most of Sprint 5 and 6 before this was
+caught.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ from pathlib import Path
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 _STATE_MODELS: list[tuple[str, str]] = [
@@ -37,19 +48,35 @@ _STATE_MODELS: list[tuple[str, str]] = [
     ("issue_to_patch.graph.state", "InvestigationPlan"),
     ("issue_to_patch.graph.state", "HumanDecision"),
     ("issue_to_patch.graph.state", "EvaluationReport"),
+    ("issue_to_patch.ingestion.models", "IssueSource"),
     ("issue_to_patch.ingestion.models", "IssueRequest"),
     ("issue_to_patch.ingestion.models", "RepositorySnapshot"),
     ("issue_to_patch.patching.models", "EditPlan"),
     ("issue_to_patch.patching.models", "FileEdit"),
     ("issue_to_patch.patching.models", "PatchArtifact"),
-    ("issue_to_patch.patching.models", "ValidationReport"),
+    ("issue_to_patch.patching.models", "CheckStatus"),
     ("issue_to_patch.patching.models", "CheckResult"),
+    ("issue_to_patch.patching.models", "ValidationReport"),
+    ("issue_to_patch.run_states", "RunState"),
 ]
+
+
+def _allowlisted_serde() -> JsonPlusSerializer:
+    """A serializer that is *strict by allowlist*: a (module, class) pair not
+    in the list above comes back as the constructor's raw positional args
+    instead of the real typed object — not an immediate error, but a
+    guaranteed one the moment downstream code touches an attribute on what it
+    expected to be, say, a ``SourceLocation``. If a new Pydantic model gets
+    added to InvestigationState, register it here; ``tests/graph/test_checkpoint.py``
+    fails loudly (via ``caplog``) if a run's checkpoint ever needed a type
+    this list doesn't have.
+    """
+    return JsonPlusSerializer(allowed_msgpack_modules=list(_STATE_MODELS))
 
 
 def default_checkpointer() -> BaseCheckpointSaver[str]:
     """A fresh, process-local checkpointer with our state models allowlisted."""
-    return MemorySaver().with_allowlist(_STATE_MODELS)
+    return MemorySaver(serde=_allowlisted_serde())
 
 
 def sqlite_checkpointer(db_path: str | Path) -> BaseCheckpointSaver[str]:
@@ -61,6 +88,6 @@ def sqlite_checkpointer(db_path: str | Path) -> BaseCheckpointSaver[str]:
     # check_same_thread=False: FastAPI may run a sync dependency in a
     # worker thread different from the one that opened the connection.
     conn = sqlite3.connect(str(path), check_same_thread=False)
-    saver = SqliteSaver(conn)
+    saver = SqliteSaver(conn, serde=_allowlisted_serde())
     saver.setup()
-    return saver.with_allowlist(_STATE_MODELS)
+    return saver
