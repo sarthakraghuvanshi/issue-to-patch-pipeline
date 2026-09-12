@@ -41,6 +41,7 @@ _ALLOWED_SUBCOMMANDS = frozenset(
         "add",
         "commit",
         "checkout",
+        "branch",
         "worktree",
         "apply",
         "format-patch",

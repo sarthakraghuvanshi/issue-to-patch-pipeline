@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 from issue_to_patch.ingestion.errors import UnsafeGitInvocation
@@ -30,7 +31,11 @@ def generate_patch(snapshot: RepositorySnapshot, plan: EditPlan) -> PatchArtifac
 
     work_parent = Path(tempfile.mkdtemp(prefix="itp-worktree-", dir=repo.parent))
     worktree = work_parent / "wt"
-    branch = "itp/patch"
+    # Unique per call: a revision loop calls generate_patch() more than once
+    # against the same snapshot, and a fixed branch name would collide with
+    # whatever the previous attempt left behind (worktree removal below does
+    # not implicitly delete the branch it was checked out on).
+    branch = f"itp/patch-{uuid.uuid4().hex[:12]}"
     try:
         git.run(
             "worktree",
@@ -71,6 +76,8 @@ def generate_patch(snapshot: RepositorySnapshot, plan: EditPlan) -> PatchArtifac
     finally:
         with contextlib.suppress(UnsafeGitInvocation):
             git.run("worktree", "remove", "--force", str(worktree), cwd=repo, check=False)
+        with contextlib.suppress(UnsafeGitInvocation):
+            git.run("branch", "-D", branch, cwd=repo, check=False)
         shutil.rmtree(work_parent, ignore_errors=True)
 
 

@@ -1,7 +1,9 @@
 """Command-line entrypoint.
 
-Wired up so far: ``version``, ``config`` (bootstrap), ``run`` (Sprint 1),
-``ingest`` (Sprint 2). ``index``, ``search``, ``review`` land in later sprints.
+``version`` / ``config`` (bootstrap) · ``run`` (Sprint 1, deterministic) ·
+``ingest`` (Sprint 2) · ``index`` / ``show-chunk`` (Sprint 3) ·
+``search`` / ``eval-retrieval`` / ``build-eval-set`` (Sprint 4) ·
+``investigate`` (Sprint 5, the LangGraph reasoning engine).
 """
 
 from __future__ import annotations
@@ -301,6 +303,77 @@ def build_eval_set(
     typer.echo(f"wrote {len(rows)} labeled examples to {out}")
     for r in rows:
         typer.echo(f"  {r.issue_id:<32} gold={r.gold_files}")
+
+
+@app.command()
+def investigate(
+    issue: Annotated[str, typer.Option(help="Issue URL, owner/repo#n, fixture path, or raw text")],
+    snapshot: Annotated[
+        Path, typer.Option(help="Snapshot dir (from `ingest`) — must already be `index`ed")
+    ],
+    scope: Annotated[
+        list[str] | None, typer.Option(help="Glob(s) the patch must stay within")
+    ] = None,
+    decision: Annotated[
+        str | None,
+        typer.Option(help="Resolve the human gate immediately: approve | reject | revise"),
+    ] = None,
+    reason: Annotated[str, typer.Option(help="Reason recorded with --decision")] = "",
+) -> None:
+    """Run the reasoning graph on an issue: investigate, draft a patch, pause for review.
+
+    Runs entirely within this process — the checkpointer is in-memory (see
+    ``graph/checkpoint.py``), so resuming a paused run from a *separate*
+    ``investigate`` invocation isn't possible yet. Pass ``--decision`` to
+    resolve the human gate immediately and see the run through to a final
+    state in one command; omit it to stop at the pending review and inspect it.
+    """
+    from issue_to_patch.graph import (
+        GraphDependencies,
+        HumanDecision,
+        build_dependencies,
+        resume_investigation,
+        start_investigation,
+    )
+    from issue_to_patch.ingestion.snapshot import load_snapshot
+    from issue_to_patch.persistence import Store
+
+    settings = get_settings()
+    snap = load_snapshot(snapshot)
+    store = Store(settings.database_url)
+    if not store.indexed_paths(snap.repo or snap.source, snap.commit_sha):
+        typer.echo("no chunks indexed for this snapshot — run `index` first", err=True)
+        raise typer.Exit(2)
+
+    deps: GraphDependencies = build_dependencies(store=store, settings=settings)
+    handle = start_investigation(issue_ref=issue, repository=snap, deps=deps, allowed_scope=scope)
+
+    if decision and handle.awaiting_human:
+        handle = resume_investigation(handle, HumanDecision(decision=decision, reason=reason))
+
+    state = handle.state
+    typer.echo(f"run_id:        {handle.run_id}")
+    if (parsed_issue := state.get("issue")) is not None:
+        typer.echo(f"issue:         {parsed_issue.reference}")
+    if hypotheses := state.get("hypotheses"):
+        top = hypotheses[0]
+        typer.echo(f"root cause:    {top.summary} (confidence={top.confidence:.2f})")
+        for loc in top.cites:
+            typer.echo(
+                f"  cites:       {loc.path}:{loc.line_start}-{loc.line_end} [{loc.chunk_id}]"
+            )
+    if (patch := state.get("candidate_patch")) is not None:
+        typer.echo(f"changed_files: {patch.changed_files}")
+    if (validation := state.get("validation")) is not None:
+        for check in validation.checks:
+            typer.echo(f"  [{check.status.value:>4}] {check.name} {check.detail}".rstrip())
+    if handle.awaiting_human:
+        typer.echo("status:        AWAITING_HUMAN_REVIEW — rerun with --decision to resolve")
+        raise typer.Exit(10)
+    final_state = state["final_state"]
+    assert final_state is not None  # PersistRun always sets it once the graph reaches END
+    typer.echo(f"state:         {final_state.value}")
+    raise typer.Exit(_EXIT_CODES[final_state])
 
 
 if __name__ == "__main__":

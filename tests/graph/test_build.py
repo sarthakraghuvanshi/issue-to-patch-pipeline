@@ -1,0 +1,121 @@
+"""End-to-end: the compiled graph runs on a real (fixture) repo with a fake LLM,
+pauses at the human gate, and every terminal path lands on exactly one RunState."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from issue_to_patch.config.settings import Settings
+from issue_to_patch.graph.deps import GraphDependencies
+from issue_to_patch.graph.run import resume_investigation, start_investigation
+from issue_to_patch.graph.state import HumanDecision
+from issue_to_patch.ingestion.snapshot import create_snapshot
+from issue_to_patch.llm.client import FakeLLM
+from issue_to_patch.persistence import Store
+from issue_to_patch.processing import index_snapshot
+from issue_to_patch.retrieval import RetrievalService
+from issue_to_patch.run_states import RunState
+
+pytestmark = pytest.mark.integration
+
+_FIX = {
+    "message": "fix: correct add()",
+    "edits": [
+        {
+            "path": "calculator.py",
+            "old": "return a - b  # BUG: should be a + b",
+            "new": "return a + b",
+        }
+    ],
+}
+
+
+@pytest.fixture
+def deps_and_repo(fixture_repo: Path, tmp_path: Path):
+    snap = create_snapshot(str(fixture_repo), tmp_path / "snap", repo_name="acme/calc")
+    store = Store(f"sqlite+pysqlite:///{tmp_path / 'g.db'}")
+    store.create_all()
+    index_snapshot(snap, store)
+    llm = FakeLLM()
+    deps = GraphDependencies(
+        llm=llm, retrieval=RetrievalService(store), store=store, settings=Settings()
+    )
+    return deps, snap
+
+
+def _queue_happy_path(llm: FakeLLM) -> None:
+    llm.queue_structured({"search_queries": ["add returns wrong result"], "focus_areas": []})
+    llm.queue_structured(
+        {"hypotheses": [{"summary": "subtracts instead of adds", "confidence": 0.9}]}
+    )
+    llm.queue_structured(_FIX)
+
+
+def test_full_run_pauses_at_human_gate_then_approves_to_patch_validated(deps_and_repo) -> None:
+    deps, snap = deps_and_repo
+    _queue_happy_path(deps.llm)
+
+    handle = start_investigation(
+        issue_ref="add() returns the wrong result",
+        repository=snap,
+        deps=deps,
+        allowed_scope=["calculator.py"],
+    )
+    assert handle.awaiting_human is True
+    assert handle.state["candidate_patch"] is not None
+    assert handle.state["validation"].run_state is RunState.PATCH_VALIDATED
+    # every citation on the way to a patch traces back to a real chunk
+    assert handle.state["hypotheses"][0].cites
+    for loc in handle.state["hypotheses"][0].cites:
+        assert deps.store.get_chunk(loc.chunk_id) is not None
+
+    resumed = resume_investigation(handle, HumanDecision(decision="approve"))
+    assert resumed.awaiting_human is False
+    assert resumed.state["final_state"] is RunState.PATCH_VALIDATED
+    assert deps.store.get_run_state(handle.run_id) == "PATCH_VALIDATED"
+
+
+def test_human_rejection_ends_the_run_as_patch_rejected(deps_and_repo) -> None:
+    deps, snap = deps_and_repo
+    _queue_happy_path(deps.llm)
+
+    handle = start_investigation(
+        issue_ref="add() returns the wrong result",
+        repository=snap,
+        deps=deps,
+        allowed_scope=["calculator.py"],
+    )
+    resumed = resume_investigation(handle, HumanDecision(decision="reject", reason="not it"))
+    assert resumed.state["final_state"] is RunState.PATCH_REJECTED
+    assert deps.store.get_run_state(handle.run_id) == "PATCH_REJECTED"
+
+
+def test_edit_that_never_applies_is_inconclusive_after_one_revision_without_a_human(
+    deps_and_repo,
+) -> None:
+    deps, snap = deps_and_repo
+    deps.llm.queue_structured({"search_queries": [], "focus_areas": []})
+    deps.llm.queue_structured({"hypotheses": [{"summary": "bad guess", "confidence": 0.9}]})
+    # both attempts reference text that isn't in calculator.py -> EditApplicationError each time
+    bad_fix = {"message": "fix", "edits": [{"path": "calculator.py", "old": "nope", "new": "x"}]}
+    deps.llm.queue_structured(bad_fix)
+    deps.llm.queue_structured(bad_fix)
+
+    handle = start_investigation(
+        issue_ref="add() returns the wrong result",
+        repository=snap,
+        deps=deps,
+        allowed_scope=["calculator.py"],
+    )
+    assert handle.awaiting_human is False  # no patch ever applied -> straight to PersistRun
+    assert handle.state["final_state"] is RunState.INVESTIGATION_INCONCLUSIVE
+    assert deps.store.get_run_state(handle.run_id) == "INVESTIGATION_INCONCLUSIVE"
+
+
+def test_bad_issue_reference_never_reaches_the_llm(deps_and_repo) -> None:
+    deps, snap = deps_and_repo  # LLM queue stays empty -> any call would raise
+    handle = start_investigation(issue_ref="", repository=snap, deps=deps)
+    assert handle.awaiting_human is False
+    assert handle.state["final_state"] is RunState.INVESTIGATION_INCONCLUSIVE

@@ -18,7 +18,9 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 - [x] Sprint 4 — BM25 + dense (hashing embedder) + hybrid (RRF) retrieval; `search` / `eval-retrieval`
 - [x] Milestone 2 gate — 20 labeled issues over langchain-ai/langchain (3,125 files); hybrid
       beats BM25 (see [evals/README.md](evals/README.md)) — hybrid stays the default mode
-- [ ] Sprint 5 — single-agent LangGraph reasoning engine
+- [x] Sprint 5 — single-agent LangGraph reasoning engine (12 nodes, deterministic router,
+      human-review gate, real Anthropic provider); `investigate`
+- [ ] Sprint 6 — OpenAPI service + durable (cross-process) resumability
 
 ## Quickstart
 
@@ -56,6 +58,17 @@ uv run issue-to-patch show-chunk <chunk_id> --metadata   # source, byte-identica
 uv run issue-to-patch search "add() returns the wrong result" \
   --snapshot artifacts/<run_id>/snapshot --mode hybrid --explain
 uv run issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl
+
+# Sprint 5: investigate + draft a patch through the reasoning graph, pause for human review
+export ITP_LLM_PROVIDER=anthropic ITP_LLM_API_KEY=sk-ant-...   # or leave as `fake` for FakeLLM tests
+uv run issue-to-patch investigate --issue "add() returns the wrong result" \
+  --snapshot artifacts/<run_id>/snapshot --scope 'src/**'
+# prints the root-cause hypothesis + its citations, the diff, validation checks,
+# then pauses (exit 10) until you resolve it:
+uv run issue-to-patch investigate --issue "..." --snapshot ... --decision approve
+# --decision is only resumable within the same process/invocation for now — the
+# checkpointer is in-memory; a durable one (so `approve` can come from a separate
+# command, or an API call) is Sprint 6.
 ```
 
 > The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
@@ -67,7 +80,7 @@ uv run issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl
 | Path | Role |
 |---|---|
 | `src/issue_to_patch/config/` | `Settings` (env-driven, fails fast) |
-| `src/issue_to_patch/llm/` | the only seam to a language model; `FakeLLM` for tests |
+| `src/issue_to_patch/llm/` | the only seam to a language model; `FakeLLM` for tests, `AnthropicLLM` for real |
 | `src/issue_to_patch/ingestion/` | Data Sources: GitHub client, issue normalization, snapshots |
 | `src/issue_to_patch/processing/` | parsing, structure analysis, structure-aware chunking, metadata |
 | `src/issue_to_patch/retrieval/` | BM25, embeddings, hybrid ranking |
