@@ -16,6 +16,8 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 - [x] Sprint 2 — GitHub ingestion (async client, retries, pagination, ETag cache; raw archive + snapshot)
 - [x] Sprint 3 — structure-aware chunking (tree-sitter) + rule-based metadata; `index` / `show-chunk`
 - [x] Sprint 4 — BM25 + dense (hashing embedder) + hybrid (RRF) retrieval; `search` / `eval-retrieval`
+- [x] Milestone 2 gate — 20 labeled issues over langchain-ai/langchain (3,125 files); hybrid
+      beats BM25 (see [evals/README.md](evals/README.md)) — hybrid stays the default mode
 - [ ] Sprint 5 — single-agent LangGraph reasoning engine
 
 ## Quickstart
