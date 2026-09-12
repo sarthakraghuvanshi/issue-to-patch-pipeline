@@ -102,6 +102,33 @@ async def test_pagination_follows_link_header() -> None:
 
 
 @respx.mock
+async def test_search_issues_iterates_items_across_pages() -> None:
+    route = respx.get(f"{BASE}/search/issues")
+    route.side_effect = [
+        httpx.Response(200, json={"total_count": 3, "items": [{"number": 1}, {"number": 2}]}),
+        httpx.Response(200, json={"total_count": 3, "items": [{"number": 3}]}),
+        httpx.Response(200, json={"total_count": 3, "items": []}),
+    ]
+    client = await _client()
+    numbers = [item["number"] async for item in client.search_issues("repo:o/r", max_items=10)]
+    assert numbers == [1, 2, 3]
+    await client.aclose()
+
+
+@respx.mock
+async def test_search_issues_stops_at_max_items_without_extra_page() -> None:
+    respx.get(f"{BASE}/search/issues").mock(
+        return_value=httpx.Response(
+            200, json={"total_count": 5, "items": [{"number": n} for n in range(1, 6)]}
+        )
+    )
+    client = await _client()
+    numbers = [item["number"] async for item in client.search_issues("repo:o/r", max_items=2)]
+    assert numbers == [1, 2]
+    await client.aclose()
+
+
+@respx.mock
 async def test_etag_cache_turns_repeat_into_304() -> None:
     route = respx.get(f"{BASE}/repos/o/r")
     route.side_effect = [

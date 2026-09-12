@@ -197,6 +197,16 @@ class Store:
                     row.embedding = vector
             return len(embeddings)
 
+    def indexed_paths(self, repository: str, commit_sha: str) -> set[str]:
+        """Paths actually indexed for repo@sha, so a dataset builder can filter to them."""
+        with self.session() as session:
+            rows = session.scalars(
+                select(ChunkRow.path)
+                .where(ChunkRow.repository == repository, ChunkRow.commit_sha == commit_sha)
+                .distinct()
+            ).all()
+            return set(rows)
+
     def count_chunks(self, repository: str, commit_sha: str) -> int:
         with self.session() as session:
             return (

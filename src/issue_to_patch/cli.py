@@ -245,5 +245,63 @@ def eval_retrieval(
     typer.echo(render_report(report))
 
 
+@app.command("build-eval-set")
+def build_eval_set(
+    repo: Annotated[str, typer.Option(help="owner/name, e.g. langchain-ai/langchain")],
+    commit_sha: Annotated[str, typer.Option(help="The SHA you indexed (pins the labels to it)")],
+    out: Annotated[Path, typer.Option(help="Output JSONL path")] = Path(
+        "evals/labeled_issues.jsonl"
+    ),
+    count: Annotated[int, typer.Option(help="Target number of labeled examples")] = 20,
+    max_files: Annotated[int, typer.Option(help="Skip PRs touching more code files than this")] = 4,
+    query_filter: Annotated[
+        str, typer.Option(help="Extra GitHub search qualifiers, e.g. 'label:bug'")
+    ] = "",
+    token: Annotated[
+        str | None, typer.Option(help="GitHub token (else ITP_GITHUB_TOKEN, else anonymous)")
+    ] = None,
+) -> None:
+    """Mine merged bug-fix PRs into a labeled retrieval-eval set (issue text -> changed files)."""
+    import asyncio
+
+    from issue_to_patch.ingestion.github import GitHubClient
+    from issue_to_patch.persistence import Store
+    from issue_to_patch.retrieval.dataset import build_labeled_issues, write_jsonl
+    from issue_to_patch.retrieval.evaluation import LabeledIssue
+
+    settings = get_settings()
+    resolved_token = token or (
+        settings.github_token.get_secret_value() if settings.github_token else None
+    )
+    store = Store(settings.database_url)
+    indexed = store.indexed_paths(repo, commit_sha)
+    if not indexed:
+        typer.echo(f"no chunks indexed for {repo}@{commit_sha[:12]} — run `index` first", err=True)
+        raise typer.Exit(2)
+
+    async def _go() -> list[LabeledIssue]:
+        async with GitHubClient(token=resolved_token, base_url=settings.github_api_base) as client:
+            return await build_labeled_issues(
+                client,
+                repo,
+                commit_sha,
+                indexed_paths=indexed,
+                count=count,
+                max_files=max_files,
+                extra_query=query_filter,
+            )
+
+    rows = asyncio.run(_go())
+    if not rows:
+        typer.echo(
+            "no usable PRs found — try --query-filter 'label:bug' or a larger --count", err=True
+        )
+        raise typer.Exit(1)
+    write_jsonl(rows, out)
+    typer.echo(f"wrote {len(rows)} labeled examples to {out}")
+    for r in rows:
+        typer.echo(f"  {r.issue_id:<32} gold={r.gold_files}")
+
+
 if __name__ == "__main__":
     app()

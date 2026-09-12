@@ -171,6 +171,37 @@ class GitHubClient:
             next_path = _next_link(response.headers.get("Link", ""))
             next_params = None  # the next link already carries the query string
 
+    # -- search ---------------------------------------------------
+    async def search_issues(
+        self, query: str, *, sort: str = "updated", order: str = "desc", max_items: int = 100
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Iterate ``/search/issues`` results (the payload is ``{items: [...]}``, not a list)."""
+        per_page = 50
+        page = 1
+        yielded = 0
+        while yielded < max_items:
+            body = await self.get_json(
+                "/search/issues",
+                params={
+                    "q": query,
+                    "sort": sort,
+                    "order": order,
+                    "per_page": per_page,
+                    "page": page,
+                },
+            )
+            items = body.get("items", []) if isinstance(body, dict) else []
+            if not items:
+                return
+            for item in items:
+                yield item
+                yielded += 1
+                if yielded >= max_items:
+                    return
+            page += 1
+            if page > 20:  # GitHub search caps at 1000 results (20 pages * 50)
+                return
+
     # -- rate-limit helpers -----------------------------------------
     @staticmethod
     def _is_rate_limited(response: httpx.Response) -> bool:
