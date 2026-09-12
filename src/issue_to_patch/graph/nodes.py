@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from issue_to_patch.config.settings import AgentMode
 from issue_to_patch.graph.deps import GraphDependencies
 from issue_to_patch.graph.router import approval_is_authorized
 from issue_to_patch.graph.state import (
@@ -27,6 +28,7 @@ from issue_to_patch.graph.state import (
     InvestigationState,
     SourceLocation,
 )
+from issue_to_patch.ingestion.models import IssueRequest
 from issue_to_patch.ingestion.normalize import normalize_issue
 from issue_to_patch.llm.client import Message
 from issue_to_patch.logging import get_logger
@@ -35,6 +37,12 @@ from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.patching.worktree import EditApplicationError, generate_patch
 from issue_to_patch.retrieval.models import RetrievalMode, SearchFilters
 from issue_to_patch.run_states import RunState
+
+# agents.pipeline imports graph.deps/graph.state, and graph/__init__.py
+# eagerly imports this module (via build.py) — a module-level import of
+# agents.pipeline here would be circular (which package's __init__.py runs
+# first decides which side fails). Imported lazily instead, inside the two
+# functions that call into the multi-agent path.
 
 _log = get_logger("graph.nodes")
 
@@ -154,6 +162,21 @@ def analyze_root_cause(state: InvestigationState, deps: GraphDependencies) -> di
     assert issue is not None
     code_evidence = [e for e in state["evidence"] if e.kind == "code" and e.source_location]
 
+    if deps.settings.agent_mode is AgentMode.MULTI:
+        from issue_to_patch.agents.pipeline import run_analysis_pipeline
+
+        hypotheses = run_analysis_pipeline(issue, code_evidence, deps)
+    else:
+        hypotheses = _analyze_single_llm_call(issue, code_evidence, deps)
+
+    hypotheses = _backfill_citations(hypotheses, code_evidence)
+    selected = hypotheses[0].cites if hypotheses else []
+    return {"hypotheses": hypotheses, "selected_files": selected}
+
+
+def _analyze_single_llm_call(
+    issue: IssueRequest, code_evidence: list[Evidence], deps: GraphDependencies
+) -> list[Hypothesis]:
     catalog = "\n\n".join(
         f"[{e.source_location.chunk_id}] {e.source_location.path}:"
         f"{e.source_location.line_start}-{e.source_location.line_end}\n{e.content[:800]}"
@@ -171,9 +194,7 @@ def analyze_root_cause(state: InvestigationState, deps: GraphDependencies) -> di
         Message(role="user", content=f"Issue: {issue.title}\n{issue.body}\n\nEvidence:\n{catalog}"),
     ]
     response = deps.llm.structured(messages, _HypothesesResponse)
-    hypotheses = _backfill_citations(response.hypotheses, code_evidence)
-    selected = hypotheses[0].cites if hypotheses else []
-    return {"hypotheses": hypotheses, "selected_files": selected}
+    return response.hypotheses
 
 
 def _backfill_citations(
@@ -231,35 +252,63 @@ def select_additional_evidence(
 
 # -- 7. DraftPatch ----------------------------------------------------------
 def draft_patch(state: InvestigationState, deps: GraphDependencies) -> dict[str, object]:
-    edit_plan = _propose_edit_plan(state, deps, revision_note="")
-    return _apply_edit_plan(state, edit_plan)
+    return _draft_or_reject(state, deps, revision_note="")
 
 
 # -- 10. RevisePatch (shares DraftPatch's LLM call, with failure context) --
 def revise_patch(state: InvestigationState, deps: GraphDependencies) -> dict[str, object]:
     validation = state.get("validation")
     failures = "; ".join(c.detail or c.name for c in validation.failures) if validation else ""
-    edit_plan = _propose_edit_plan(
-        state, deps, revision_note=f"Previous attempt failed: {failures}"
-    )
-    result = _apply_edit_plan(state, edit_plan)
+    result = _draft_or_reject(state, deps, revision_note=f"Previous attempt failed: {failures}")
     result["revisions_used"] = 1  # additive reducer -> total attempts so far
     return result
 
 
-def _propose_edit_plan(
+def _draft_or_reject(
     state: InvestigationState, deps: GraphDependencies, *, revision_note: str
-) -> EditPlan:
+) -> dict[str, object]:
     issue = state["issue"]
     assert issue is not None
     top = state["hypotheses"][0] if state["hypotheses"] else None
+    code_evidence = [e for e in state["evidence"] if e.kind == "code" and e.source_location]
+
+    if deps.settings.agent_mode is AgentMode.MULTI:
+        from issue_to_patch.agents.pipeline import run_draft_pipeline
+
+        edit_plan = run_draft_pipeline(
+            issue,
+            top,
+            code_evidence,
+            state.get("allowed_scope") or [],
+            deps,
+            revision_note=revision_note,
+        )
+        if edit_plan is None:
+            return {
+                "candidate_patch": None,
+                "errors": ["draft_patch: PatchReviewer rejected the draft"],
+            }
+    else:
+        edit_plan = _propose_edit_plan_single(issue, top, code_evidence, deps, revision_note)
+
+    return _apply_edit_plan(state, edit_plan)
+
+
+def _propose_edit_plan_single(
+    issue: IssueRequest,
+    top: Hypothesis | None,
+    code_evidence: list[Evidence],
+    deps: GraphDependencies,
+    revision_note: str,
+) -> EditPlan:
+    # SourceLocation isn't hashable (a plain pydantic model), so this has to
+    # stay a list membership check, not a set.
+    cited = top.cites if top else []
     files_catalog = "\n\n".join(
         f"{e.source_location.path}:{e.source_location.line_start}-{e.source_location.line_end}\n"
         f"{e.content}"
-        for e in state["evidence"]
-        if e.kind == "code"
-        and e.source_location
-        and e.source_location in (top.cites if top else [])
+        for e in code_evidence
+        if e.source_location and e.source_location in cited
     )
     messages = [
         Message(

@@ -27,8 +27,10 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 - [x] Sprint 7a — human validation roles (Gatekeeper/Auditor/Strategist) + risk
       classification (only a Gatekeeper can clear a patch touching a risky path) +
       a tamper-evident audit trail (`audit` CLI command, `GET /runs/{id}/audit`)
-- [ ] Sprint 7b — multi-agent system (six specialists replacing the single-LLM-call
-      analysis/drafting, behind `ITP_AGENT_MODE=multi`)
+- [x] Sprint 7b — multi-agent system: Issue Analyst, Repository Cartographer,
+      Root-Cause Analyst, Patch Author, Test Strategist, Patch Reviewer — six typed,
+      cited artifacts replacing the single-LLM-call analysis/drafting, behind
+      `ITP_AGENT_MODE=multi`. Same graph, same validation, same human gate either way.
 
 ## Quickstart
 
@@ -100,6 +102,13 @@ uv run issue-to-patch investigate --resume <run_id> --decision approve \
   --reviewer alice --role gatekeeper
 # every tool call and human decision is append-only and hash-chained; replay + verify it:
 uv run issue-to-patch audit <run_id>          # or GET /runs/{run_id}/audit
+
+# Sprint 7b: the same investigation, but AnalyzeRootCause/DraftPatch run as six
+# specialist agents instead of one LLM call each - same graph, same citations,
+# same validation and human gate:
+export ITP_AGENT_MODE=multi
+uv run issue-to-patch investigate --issue "add() returns the wrong result" \
+  --snapshot artifacts/<run_id>/snapshot --scope 'src/**'
 ```
 
 > The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
@@ -116,7 +125,7 @@ uv run issue-to-patch audit <run_id>          # or GET /runs/{run_id}/audit
 | `src/issue_to_patch/processing/` | parsing, structure analysis, structure-aware chunking, metadata |
 | `src/issue_to_patch/retrieval/` | BM25, embeddings, hybrid ranking |
 | `src/issue_to_patch/graph/` | LangGraph reasoning engine + deterministic router |
-| `src/issue_to_patch/agents/` | specialist agents, typed cited artifacts |
+| `src/issue_to_patch/agents/` | the six specialists (`ITP_AGENT_MODE=multi`), each a typed, cited artifact |
 | `src/issue_to_patch/patching/` | worktree edits, `git format-patch`, deterministic validation |
 | `src/issue_to_patch/evaluation/` | metrics, grounded LLM judge, cost |
 | `src/issue_to_patch/safety/` | allowlists, sandbox, stress tests |
