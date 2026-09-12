@@ -1,13 +1,14 @@
 """The single seam between the pipeline and any language model.
 
-At bootstrap only :class:`FakeLLM` existed. :class:`AnthropicLLM` (Sprint 5)
-is the first real provider, behind the same :class:`LLMClient` protocol, and
-is selected by ``ITP_LLM_PROVIDER``. A graph node never imports a provider SDK
-directly — only this module does.
+At bootstrap only :class:`FakeLLM` existed. :class:`AnthropicLLM` and
+:class:`OpenAILLM` (Sprint 5) are the real providers, behind the same
+:class:`LLMClient` protocol, selected by ``ITP_LLM_PROVIDER``. A graph node
+never imports a provider SDK directly — only this module does.
 """
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -15,6 +16,12 @@ from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from anthropic import Anthropic
 from anthropic.types import MessageParam, ToolChoiceToolParam, ToolParam
+from openai import OpenAI
+from openai.types.chat import (
+    ChatCompletionMessageParam,
+    ChatCompletionToolChoiceOptionParam,
+    ChatCompletionToolParam,
+)
 from pydantic import BaseModel, ValidationError
 
 from issue_to_patch.config import Settings, get_settings
@@ -190,12 +197,157 @@ def _split_system(messages: Sequence[Message]) -> tuple[str, list[MessageParam]]
     return system, rest
 
 
+# GPT-4o-class pricing; see the note on _COST_PER_MILLION_INPUT above.
+_OPENAI_COST_PER_MILLION_INPUT = 2.5
+_OPENAI_COST_PER_MILLION_OUTPUT = 10.0
+
+
+@dataclass
+class OpenAILLM:
+    """The second real provider, behind the same protocol. OpenAI's chat API
+    takes ``system`` as an ordinary message (no separate field like
+    Anthropic's), so messages pass through unchanged; structured output uses
+    the same forced-tool-call trick as :class:`AnthropicLLM` — the schema's
+    JSON schema becomes a function's ``parameters``, ``tool_choice`` forces
+    that exact function, one retry on a bad reply.
+    """
+
+    api_key: str
+    model: str = "gpt-5"
+    max_tokens: int = 4096
+    client: OpenAI | None = None  # injectable, so tests never touch the network
+
+    _client: OpenAI = field(init=False, repr=False)
+    total_input_tokens: int = field(default=0, init=False)
+    total_output_tokens: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        self._client = self.client or OpenAI(api_key=self.api_key)
+
+    @property
+    def cost_usd(self) -> float:
+        return (
+            self.total_input_tokens / 1_000_000 * _OPENAI_COST_PER_MILLION_INPUT
+            + self.total_output_tokens / 1_000_000 * _OPENAI_COST_PER_MILLION_OUTPUT
+        )
+
+    def complete(self, messages: Sequence[Message]) -> Completion:
+        response = self._client.chat.completions.create(
+            model=self.model,
+            max_completion_tokens=self.max_tokens,
+            messages=_to_openai_messages(messages),
+        )
+        input_tokens, output_tokens = _usage_tokens(response.usage)
+        self._record_usage(input_tokens, output_tokens)
+        return Completion(
+            text=response.choices[0].message.content or "",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model=self.model,
+        )
+
+    def structured(self, messages: Sequence[Message], schema: type[T]) -> T:
+        tool_name = schema.__name__
+        tool = cast(
+            ChatCompletionToolParam,
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": f"Emit a {tool_name}.",
+                    "parameters": schema.model_json_schema(),
+                },
+            },
+        )
+        tool_choice = cast(
+            ChatCompletionToolChoiceOptionParam,
+            {"type": "function", "function": {"name": tool_name}},
+        )
+
+        call_messages = _to_openai_messages(messages)
+        last_error: Exception | None = None
+        for _attempt in range(2):  # one retry on a schema-validation failure
+            if last_error is not None:
+                call_messages = [
+                    *call_messages,
+                    cast(
+                        ChatCompletionMessageParam,
+                        {
+                            "role": "user",
+                            "content": f"Your previous reply did not match the schema: "
+                            f"{last_error}. Reply again, correctly this time.",
+                        },
+                    ),
+                ]
+            response = self._client.chat.completions.create(
+                model=self.model,
+                max_completion_tokens=self.max_tokens,
+                messages=call_messages,
+                tools=[tool],
+                tool_choice=tool_choice,
+            )
+            input_tokens, output_tokens = _usage_tokens(response.usage)
+            self._record_usage(input_tokens, output_tokens)
+            tool_calls = response.choices[0].message.tool_calls or []
+            call = next((c for c in tool_calls if c.type == "function"), None)
+            if call is None:
+                last_error = ValueError("model did not return a tool call")
+                continue
+            try:
+                payload = json.loads(call.function.arguments)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            try:
+                return schema.model_validate(payload)
+            except ValidationError as exc:
+                last_error = exc
+        raise RuntimeError(f"structured({schema.__name__}) failed after one retry: {last_error}")
+
+    def _record_usage(self, input_tokens: int, output_tokens: int) -> None:
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+
+
+def _to_openai_messages(messages: Sequence[Message]) -> list[ChatCompletionMessageParam]:
+    return [
+        cast(ChatCompletionMessageParam, {"role": m.role, "content": m.content}) for m in messages
+    ]
+
+
+def _usage_tokens(usage: object) -> tuple[int, int]:
+    """OpenAI omits ``usage`` on some error/edge responses; never crash over it."""
+    if usage is None:
+        return 0, 0
+    return getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0)
+
+
+# The default model is tied to whichever provider it was written for; if the
+# user switches ITP_LLM_PROVIDER but leaves ITP_LLM_MODEL untouched, swap in
+# that provider's own default rather than sending the other provider's model
+# name and failing with a confusing API error.
+_DEFAULT_MODEL_BY_PROVIDER = {
+    LLMProvider.ANTHROPIC: "claude-sonnet-5",
+    LLMProvider.OPENAI: "gpt-5",
+}
+
+
+def _resolve_model(settings: Settings, provider: LLMProvider) -> str:
+    if settings.llm_model in _DEFAULT_MODEL_BY_PROVIDER.values():
+        return _DEFAULT_MODEL_BY_PROVIDER[provider]
+    return settings.llm_model
+
+
 def get_llm(settings: Settings | None = None) -> LLMClient:
     settings = settings or get_settings()
     if settings.llm_provider is LLMProvider.FAKE:
         return FakeLLM()
     if settings.llm_provider is LLMProvider.ANTHROPIC:
-        return AnthropicLLM(api_key=settings.require_llm_api_key(), model=settings.llm_model)
+        model = _resolve_model(settings, LLMProvider.ANTHROPIC)
+        return AnthropicLLM(api_key=settings.require_llm_api_key(), model=model)
+    if settings.llm_provider is LLMProvider.OPENAI:
+        model = _resolve_model(settings, LLMProvider.OPENAI)
+        return OpenAILLM(api_key=settings.require_llm_api_key(), model=model)
     raise NotImplementedError(
         f"provider {settings.llm_provider!r} has no client implementation yet"
     )

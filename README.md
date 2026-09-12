@@ -60,7 +60,8 @@ uv run issue-to-patch search "add() returns the wrong result" \
 uv run issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl
 
 # Sprint 5: investigate + draft a patch through the reasoning graph, pause for human review
-export ITP_LLM_PROVIDER=anthropic ITP_LLM_API_KEY=sk-ant-...   # or leave as `fake` for FakeLLM tests
+export ITP_LLM_PROVIDER=anthropic ITP_LLM_API_KEY=sk-ant-...   # or provider=openai + an OPENAI key
+# (leave ITP_LLM_PROVIDER=fake, the default, for offline/FakeLLM use)
 uv run issue-to-patch investigate --issue "add() returns the wrong result" \
   --snapshot artifacts/<run_id>/snapshot --scope 'src/**'
 # prints the root-cause hypothesis + its citations, the diff, validation checks,
@@ -80,7 +81,7 @@ uv run issue-to-patch investigate --issue "..." --snapshot ... --decision approv
 | Path | Role |
 |---|---|
 | `src/issue_to_patch/config/` | `Settings` (env-driven, fails fast) |
-| `src/issue_to_patch/llm/` | the only seam to a language model; `FakeLLM` for tests, `AnthropicLLM` for real |
+| `src/issue_to_patch/llm/` | the only seam to a language model; `FakeLLM` for tests, `AnthropicLLM`/`OpenAILLM` for real |
 | `src/issue_to_patch/ingestion/` | Data Sources: GitHub client, issue normalization, snapshots |
 | `src/issue_to_patch/processing/` | parsing, structure analysis, structure-aware chunking, metadata |
 | `src/issue_to_patch/retrieval/` | BM25, embeddings, hybrid ranking |
