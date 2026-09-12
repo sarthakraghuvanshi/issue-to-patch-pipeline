@@ -12,12 +12,126 @@
             "default": "",
             "title": "Reason",
             "type": "string"
+          },
+          "reviewer": {
+            "default": "human",
+            "title": "Reviewer",
+            "type": "string"
+          },
+          "role": {
+            "default": "gatekeeper",
+            "description": "gatekeeper | auditor | strategist \u2014 only a gatekeeper can clear a patch touching a risky path (safety/permissions.py)",
+            "title": "Role",
+            "type": "string"
           }
         },
         "required": [
           "decision"
         ],
         "title": "ApproveRequest",
+        "type": "object"
+      },
+      "ArtifactEntry": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "hash": {
+            "title": "Hash",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "uri",
+          "hash",
+          "created_at"
+        ],
+        "title": "ArtifactEntry",
+        "type": "object"
+      },
+      "AuditTrail": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactEntry"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/HumanDecisionEntry"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "decisions_chain_valid": {
+            "title": "Decisions Chain Valid",
+            "type": "boolean"
+          },
+          "found": {
+            "title": "Found",
+            "type": "boolean"
+          },
+          "issue_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issue Ref"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallEntry"
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          },
+          "tool_calls_chain_valid": {
+            "title": "Tool Calls Chain Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "run_id",
+          "found",
+          "tool_calls_chain_valid",
+          "decisions_chain_valid",
+          "tool_calls",
+          "decisions",
+          "artifacts"
+        ],
+        "title": "AuditTrail",
         "type": "object"
       },
       "CheckStatus": {
@@ -40,6 +154,50 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HumanDecisionEntry": {
+        "properties": {
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewer": {
+            "title": "Reviewer",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "row_hash": {
+            "title": "Row Hash",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "ts": {
+            "format": "date-time",
+            "title": "Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "role",
+          "reviewer",
+          "decision",
+          "reason",
+          "ts",
+          "row_hash"
+        ],
+        "title": "HumanDecisionEntry",
         "type": "object"
       },
       "HypothesisOut": {
@@ -398,6 +556,45 @@
         "title": "StartRunRequest",
         "type": "object"
       },
+      "ToolCallEntry": {
+        "properties": {
+          "args_redacted": {
+            "title": "Args Redacted",
+            "type": "string"
+          },
+          "result_hash": {
+            "title": "Result Hash",
+            "type": "string"
+          },
+          "row_hash": {
+            "title": "Row Hash",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "title": "Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "tool",
+          "args_redacted",
+          "result_hash",
+          "ts",
+          "row_hash"
+        ],
+        "title": "ToolCallEntry",
+        "type": "object"
+      },
       "ValidatePatchRequest": {
         "properties": {
           "added_lines": {
@@ -724,6 +921,65 @@
           }
         },
         "summary": "Approve Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/runs/{run_id}/audit": {
+      "get": {
+        "description": "Every tool call and human decision for this run, in order, with both\nappend-only hash chains verified (Phase 8's Auditor role).",
+        "operationId": "get_audit_trail_runs__run_id__audit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditTrail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Audit Trail",
         "tags": [
           "runs"
         ]

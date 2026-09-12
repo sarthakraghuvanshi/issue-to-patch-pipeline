@@ -24,7 +24,11 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
       `.../retrieval`, `.../patch`, `/search`, `/validate-patch`) over a durable
       (SQLite-file) checkpointer — a run started by one request can be approved by a
       completely different one, even after a process restart. `make serve`
-- [ ] Sprint 7 — multi-agent + human validation roles + tamper-evident audit
+- [x] Sprint 7a — human validation roles (Gatekeeper/Auditor/Strategist) + risk
+      classification (only a Gatekeeper can clear a patch touching a risky path) +
+      a tamper-evident audit trail (`audit` CLI command, `GET /runs/{id}/audit`)
+- [ ] Sprint 7b — multi-agent system (six specialists replacing the single-LLM-call
+      analysis/drafting, behind `ITP_AGENT_MODE=multi`)
 
 ## Quickstart
 
@@ -87,6 +91,15 @@ curl -s localhost:8000/runs/<run_id>/approve -X POST -H 'content-type: applicati
   -d '{"decision": "approve"}'
 # set ITP_API_KEY and send `Authorization: Bearer <key>` once this leaves local dev —
 # Settings refuses to start with no key in staging/prod.
+
+# Sprint 7a: a patch touching a risky path (.github/**, secrets, migrations, lockfiles,
+# pyproject.toml, ... see safety/permissions.py) needs the Gatekeeper role specifically —
+# an Auditor's or Strategist's "approve" ends the run PATCH_REQUIRES_HUMAN_REVIEW, not
+# PATCH_VALIDATED:
+uv run issue-to-patch investigate --resume <run_id> --decision approve \
+  --reviewer alice --role gatekeeper
+# every tool call and human decision is append-only and hash-chained; replay + verify it:
+uv run issue-to-patch audit <run_id>          # or GET /runs/{run_id}/audit
 ```
 
 > The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
@@ -107,7 +120,7 @@ curl -s localhost:8000/runs/<run_id>/approve -X POST -H 'content-type: applicati
 | `src/issue_to_patch/patching/` | worktree edits, `git format-patch`, deterministic validation |
 | `src/issue_to_patch/evaluation/` | metrics, grounded LLM judge, cost |
 | `src/issue_to_patch/safety/` | allowlists, sandbox, stress tests |
-| `src/issue_to_patch/persistence/` | SQL / vector / object-storage adapters |
+| `src/issue_to_patch/persistence/` | SQL / vector / object-storage adapters; `audit.py` replays + verifies a run's hash-chained tool-call and human-decision trail |
 | `src/issue_to_patch/api/` | FastAPI: schemas, thin routes, auth + rate-limit deps; `openapi.json` committed at repo root (`make openapi` to regenerate, checked by a contract test) |
 
 ## Configuration

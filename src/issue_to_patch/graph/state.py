@@ -15,6 +15,7 @@ current patch" — there is only ever one at a time.
 from __future__ import annotations
 
 import operator
+from enum import StrEnum
 from typing import Annotated, TypedDict
 
 from pydantic import BaseModel, Field
@@ -64,12 +65,24 @@ class InvestigationPlan(BaseModel):
     focus_areas: list[str] = Field(default_factory=list)
 
 
+class ReviewerRole(StrEnum):
+    """The three human-validation roles from Phase 8. Only the Gatekeeper's
+    approval can clear a patch that touches a risky path (safety/permissions.py)
+    — an Auditor or Strategist can still approve, reject, or ask for a revision,
+    just not authorize a risky change on their own."""
+
+    GATEKEEPER = "gatekeeper"
+    AUDITOR = "auditor"
+    STRATEGIST = "strategist"
+
+
 class HumanDecision(BaseModel):
     """The outcome of the human review gate."""
 
     decision: str = Field(description="'approve' | 'reject' | 'revise'")
     reason: str = ""
     reviewer: str = "human"
+    role: ReviewerRole = ReviewerRole.GATEKEEPER
 
 
 class EvaluationReport(BaseModel):

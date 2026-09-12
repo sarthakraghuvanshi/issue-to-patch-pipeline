@@ -16,7 +16,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from issue_to_patch.ingestion.models import stable_hash
-from issue_to_patch.persistence.models import Artifact, Base, ChunkRow, Run, ToolCall
+from issue_to_patch.persistence.models import (
+    Artifact,
+    Base,
+    ChunkRow,
+    HumanDecisionRow,
+    Run,
+    ToolCall,
+)
 
 _GENESIS_HASH = "0" * 64
 
@@ -139,6 +146,90 @@ class Store:
             prev = row.row_hash
         return True
 
+    # -- append-only human decisions ---------------------------------
+    def record_human_decision(
+        self, run_id: str, *, role: str, reviewer: str, decision: str, reason: str
+    ) -> str:
+        """Its own hash chain, same technique as :meth:`record_tool_call` —
+        a decision is a different kind of event than a tool call, so it gets
+        its own append-only sequence rather than being interleaved into one."""
+        with self.session() as session:
+            last = session.scalars(
+                select(HumanDecisionRow)
+                .where(HumanDecisionRow.run_id == run_id)
+                .order_by(HumanDecisionRow.seq.desc())
+                .limit(1)
+            ).first()
+            seq = 1 if last is None else last.seq + 1
+            prev_hash = _GENESIS_HASH if last is None else last.row_hash
+            ts = datetime.now(UTC)
+            row_hash = stable_hash(
+                prev_hash, run_id, str(seq), role, reviewer, decision, reason, _ts_key(ts)
+            )
+            session.add(
+                HumanDecisionRow(
+                    run_id=run_id,
+                    seq=seq,
+                    role=role,
+                    reviewer=reviewer,
+                    decision=decision,
+                    reason=reason,
+                    ts=ts,
+                    prev_hash=prev_hash,
+                    row_hash=row_hash,
+                )
+            )
+            return row_hash
+
+    def list_human_decisions(self, run_id: str) -> list[HumanDecisionRow]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(HumanDecisionRow)
+                .where(HumanDecisionRow.run_id == run_id)
+                .order_by(HumanDecisionRow.seq)
+            ).all()
+            for row in rows:
+                session.expunge(row)
+            return list(rows)
+
+    def verify_decision_chain(self, run_id: str) -> bool:
+        """Recompute the human-decision hash chain; False if any link is broken."""
+        rows = self.list_human_decisions(run_id)
+        prev = _GENESIS_HASH
+        for row in rows:
+            expected = stable_hash(
+                prev,
+                run_id,
+                str(row.seq),
+                row.role,
+                row.reviewer,
+                row.decision,
+                row.reason,
+                _ts_key(row.ts),
+            )
+            if row.prev_hash != prev or row.row_hash != expected:
+                return False
+            prev = row.row_hash
+        return True
+
+    def list_tool_calls(self, run_id: str) -> list[ToolCall]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(ToolCall).where(ToolCall.run_id == run_id).order_by(ToolCall.seq)
+            ).all()
+            for row in rows:
+                session.expunge(row)
+            return list(rows)
+
+    def list_artifacts(self, run_id: str) -> list[Artifact]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.created_at)
+            ).all()
+            for row in rows:
+                session.expunge(row)
+            return list(rows)
+
     # -- artifacts --------------------------------------------------
     def record_artifact(self, run_id: str, *, kind: str, uri: str, content_hash: str) -> None:
         with self.session() as session:
@@ -157,6 +248,13 @@ class Store:
         with self.session() as session:
             run = session.get(Run, run_id)
             return None if run is None else run.state
+
+    def get_run(self, run_id: str) -> Run | None:
+        with self.session() as session:
+            run = session.get(Run, run_id)
+            if run is not None:
+                session.expunge(run)
+            return run
 
     # -- chunks ---------------------------------------------------
     def replace_chunks(

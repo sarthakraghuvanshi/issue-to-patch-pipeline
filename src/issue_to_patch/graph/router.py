@@ -11,8 +11,9 @@ next.
 from __future__ import annotations
 
 from issue_to_patch.config import Settings
-from issue_to_patch.graph.state import InvestigationState
+from issue_to_patch.graph.state import InvestigationState, ReviewerRole
 from issue_to_patch.run_states import RunState
+from issue_to_patch.safety.permissions import is_risky
 
 PERSIST_RUN = "PersistRun"
 PLAN_INVESTIGATION = "PlanInvestigation"
@@ -90,13 +91,30 @@ def route_after_validation(state: InvestigationState, settings: Settings) -> str
     return REQUEST_HUMAN_VALIDATION
 
 
+def approval_is_authorized(state: InvestigationState) -> bool:
+    """A patch touching a risky path (safety/permissions.py) needs the
+    Gatekeeper role specifically — an Auditor or Strategist can reject or ask
+    for a revision, but cannot clear a risky change on their own (Phase 8:
+    'Gatekeeper approves repository access, commands, and patch application').
+    Used by both the router (what happens next) and PersistRun (the final
+    state), so the two can't drift apart on what "authorized" means.
+    """
+    patch = state.get("candidate_patch")
+    if patch is None or not is_risky(patch.changed_files):
+        return True
+    decision = state.get("human_decision")
+    return decision is not None and decision.role is ReviewerRole.GATEKEEPER
+
+
 def route_after_human(state: InvestigationState, settings: Settings) -> str:
     """Gatekeeper's decision: approve completes the run, reject ends it, and a
-    request to revise consumes one more revision if the budget allows it."""
+    request to revise consumes one more revision if the budget allows it. An
+    "approve" on a risky patch from anyone but the Gatekeeper doesn't count —
+    it still ends the run, just not as a validated patch."""
     decision = state["human_decision"]
     assert decision is not None
     if decision.decision == "approve":
-        return EVALUATE_RUN
+        return EVALUATE_RUN if approval_is_authorized(state) else PERSIST_RUN
     if decision.decision == "reject":
         return PERSIST_RUN
     if state.get("revisions_used", 0) < settings.max_patch_revisions:

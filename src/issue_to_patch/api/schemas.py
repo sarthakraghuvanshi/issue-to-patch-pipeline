@@ -52,6 +52,12 @@ class RunStateResponse(BaseModel):
 class ApproveRequest(BaseModel):
     decision: str = Field(description="approve | reject | revise")
     reason: str = ""
+    reviewer: str = "human"
+    role: str = Field(
+        default="gatekeeper",
+        description="gatekeeper | auditor | strategist — only a gatekeeper can "
+        "clear a patch touching a risky path (safety/permissions.py)",
+    )
 
 
 class RetrievalHitOut(BaseModel):

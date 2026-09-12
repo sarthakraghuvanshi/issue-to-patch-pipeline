@@ -102,6 +102,92 @@ def test_investigate_with_decision_reaches_patch_validated(
     assert "state:         PATCH_VALIDATED" in result.output
 
 
+def test_investigate_resumes_a_previously_started_run_via_resume_flag(
+    indexed_snapshot: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_fake_llm(monkeypatch)
+    started = runner.invoke(
+        app,
+        [
+            "investigate",
+            "--issue",
+            "add() returns the wrong result",
+            "--snapshot",
+            str(indexed_snapshot),
+            "--scope",
+            "calculator.py",
+        ],
+    )
+    assert started.exit_code == 10
+    run_id = next(
+        line.split(":", 1)[1].strip()
+        for line in started.output.splitlines()
+        if line.startswith("run_id:")
+    )
+
+    resumed = runner.invoke(app, ["investigate", "--resume", run_id, "--decision", "approve"])
+    assert resumed.exit_code == 0
+    assert "state:         PATCH_VALIDATED" in resumed.output
+
+
+def test_investigate_resume_of_an_unknown_run_id_fails_cleanly(
+    indexed_snapshot: Path,
+) -> None:
+    result = runner.invoke(app, ["investigate", "--resume", "no-such-run"])
+    assert result.exit_code == 2
+    assert "no such run" in result.output
+
+
+def test_investigate_requires_issue_and_snapshot_when_not_resuming(
+    indexed_snapshot: Path,
+) -> None:
+    result = runner.invoke(app, ["investigate"])
+    assert result.exit_code == 2
+    assert "--resume" in result.output
+
+
+def test_investigate_rejects_an_invalid_decision_value(
+    indexed_snapshot: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_fake_llm(monkeypatch)
+    result = runner.invoke(
+        app,
+        [
+            "investigate",
+            "--issue",
+            "add() returns the wrong result",
+            "--snapshot",
+            str(indexed_snapshot),
+            "--decision",
+            "maybe",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "approve | reject | revise" in result.output
+
+
+def test_investigate_rejects_an_invalid_role_value(
+    indexed_snapshot: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_fake_llm(monkeypatch)
+    result = runner.invoke(
+        app,
+        [
+            "investigate",
+            "--issue",
+            "add() returns the wrong result",
+            "--snapshot",
+            str(indexed_snapshot),
+            "--decision",
+            "approve",
+            "--role",
+            "wizard",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "gatekeeper | auditor | strategist" in result.output
+
+
 def test_investigate_refuses_an_unindexed_snapshot(
     fixture_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

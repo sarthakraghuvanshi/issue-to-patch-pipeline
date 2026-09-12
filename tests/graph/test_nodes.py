@@ -13,6 +13,7 @@ from issue_to_patch.graph.state import (
     Evidence,
     HumanDecision,
     Hypothesis,
+    ReviewerRole,
     SourceLocation,
     new_state,
 )
@@ -266,6 +267,24 @@ def test_request_human_validation_is_a_noop_once_decision_is_set(tmp_path: Path)
     assert nodes.request_human_validation(state, _deps(tmp_path)) == {}
 
 
+def test_request_human_validation_persists_the_decision_for_the_audit_trail(
+    tmp_path: Path,
+) -> None:
+    deps = _deps(tmp_path)
+    state = new_state(run_id="r1", issue_ref="x")
+    state["human_decision"] = HumanDecision(
+        decision="approve", reason="looks right", reviewer="alice", role=ReviewerRole.GATEKEEPER
+    )
+    nodes.request_human_validation(state, deps)
+
+    recorded = deps.store.list_human_decisions("r1")
+    assert len(recorded) == 1
+    assert recorded[0].reviewer == "alice"
+    assert recorded[0].role == "gatekeeper"
+    assert recorded[0].decision == "approve"
+    assert deps.store.verify_decision_chain("r1") is True
+
+
 def test_request_human_validation_errors_if_resumed_without_a_decision(tmp_path: Path) -> None:
     state = new_state(run_id="r1", issue_ref="x")
     out = nodes.request_human_validation(state, _deps(tmp_path))
@@ -313,6 +332,46 @@ def test_evaluate_run_summarizes_the_state(tmp_path: Path) -> None:
             RunState.PATCH_REJECTED,
         ),
         (lambda s: None, RunState.INVESTIGATION_INCONCLUSIVE),
+        (
+            lambda s: (
+                s.__setitem__(
+                    "candidate_patch",
+                    PatchArtifact(
+                        base_sha="a",
+                        commit_sha="b",
+                        changed_files=[".github/workflows/deploy.yml"],
+                        added_lines=1,
+                        removed_lines=0,
+                        patch_text="diff --git",
+                    ),
+                ),
+                s.__setitem__(
+                    "human_decision",
+                    HumanDecision(decision="approve", role=ReviewerRole.GATEKEEPER),
+                ),
+            ),
+            RunState.PATCH_VALIDATED,
+        ),
+        (
+            lambda s: (
+                s.__setitem__(
+                    "candidate_patch",
+                    PatchArtifact(
+                        base_sha="a",
+                        commit_sha="b",
+                        changed_files=[".github/workflows/deploy.yml"],
+                        added_lines=1,
+                        removed_lines=0,
+                        patch_text="diff --git",
+                    ),
+                ),
+                s.__setitem__(
+                    "human_decision",
+                    HumanDecision(decision="approve", role=ReviewerRole.AUDITOR),
+                ),
+            ),
+            RunState.PATCH_REQUIRES_HUMAN_REVIEW,
+        ),
     ],
 )
 def test_persist_run_determines_the_right_final_state(tmp_path, build_state, expected) -> None:

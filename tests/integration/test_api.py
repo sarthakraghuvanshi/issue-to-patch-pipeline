@@ -83,6 +83,7 @@ async def test_openapi_schema_lists_every_endpoint(client: tuple) -> None:
         "/runs/{run_id}/approve",
         "/runs/{run_id}/retrieval",
         "/runs/{run_id}/patch",
+        "/runs/{run_id}/audit",
         "/search",
         "/validate-patch",
     }
@@ -120,10 +121,65 @@ async def test_full_run_pauses_then_approves_to_patch_validated(client: tuple) -
     assert retrieval.status_code == 200
     assert any(e["kind"] == "code" for e in retrieval.json()["evidence"])
 
-    approved = await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    approved = await async_client.post(
+        f"/runs/{run_id}/approve", json={"decision": "approve", "reviewer": "alice"}
+    )
     assert approved.status_code == 200
     assert approved.json()["status"] == "PATCH_VALIDATED"
     assert store.get_run_state(run_id) == "PATCH_VALIDATED"
+
+    audit = await async_client.get(f"/runs/{run_id}/audit")
+    assert audit.status_code == 200
+    trail = audit.json()
+    assert trail["tool_calls_chain_valid"] is True
+    assert trail["decisions_chain_valid"] is True
+    assert [d["reviewer"] for d in trail["decisions"]] == ["alice"]
+    assert any(t["tool"] == "validate_patch" for t in trail["tool_calls"])
+
+
+async def test_audit_endpoint_404s_for_an_unknown_run(client: tuple) -> None:
+    async_client, _snap_dir, _llm, _store = client
+    response = await async_client.get("/runs/does-not-exist/audit")
+    assert response.status_code == 404
+
+
+async def test_approve_rejects_an_invalid_role(client: tuple) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs", json={"issue": "add() bug", "snapshot": str(snap_dir)}
+    )
+    run_id = started.json()["run_id"]
+
+    response = await async_client.post(
+        f"/runs/{run_id}/approve", json={"decision": "approve", "role": "wizard"}
+    )
+    assert response.status_code == 422
+
+
+async def test_a_risky_patch_needs_the_gatekeeper_role_via_the_api(client: tuple) -> None:
+    async_client, snap_dir, llm, store = client
+    llm.queue_structured({"search_queries": [], "focus_areas": []})
+    llm.queue_structured({"hypotheses": [{"summary": "ci needs a fix", "confidence": 0.9}]})
+    llm.queue_structured(
+        {
+            "message": "fix: adjust ci",
+            "edits": [{"path": ".github/workflows/deploy.yml", "old": "", "new": "name: deploy\n"}],
+        }
+    )
+    started = await async_client.post(
+        "/runs",
+        json={"issue": "ci is broken", "snapshot": str(snap_dir), "scope": [".github/**"]},
+    )
+    run_id = started.json()["run_id"]
+
+    denied = await async_client.post(
+        f"/runs/{run_id}/approve",
+        json={"decision": "approve", "reviewer": "bob", "role": "auditor"},
+    )
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "PATCH_REQUIRES_HUMAN_REVIEW"
+    assert store.get_run_state(run_id) == "PATCH_REQUIRES_HUMAN_REVIEW"
 
 
 async def test_approve_before_awaiting_review_is_a_conflict(client: tuple) -> None:

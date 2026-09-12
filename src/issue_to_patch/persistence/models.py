@@ -37,6 +37,9 @@ class Run(Base):
     artifacts: Mapped[list[Artifact]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
+    human_decisions: Mapped[list[HumanDecisionRow]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="HumanDecisionRow.seq"
+    )
 
 
 class ToolCall(Base):
@@ -87,6 +90,31 @@ class ChunkRow(Base):
     reference_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
     # Dense embedding (Sprint 4). JSON list here; a pgvector column in prod.
     embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+
+
+class HumanDecisionRow(Base):
+    """One recorded human-validation decision (Phase 8): who, in what role,
+    decided what, and why. Its own append-only hash chain, same technique as
+    ``ToolCall`` — a separate chain rather than interleaving into the
+    tool-call one, since a decision and a tool call are different kinds of
+    event; both are equally tamper-evident on their own.
+    """
+
+    __tablename__ = "human_decisions"
+    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_humandecision_run_seq"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(32))
+    reviewer: Mapped[str] = mapped_column(String(255))
+    decision: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    ts: Mapped[datetime] = mapped_column()
+    prev_hash: Mapped[str] = mapped_column(String(64))
+    row_hash: Mapped[str] = mapped_column(String(64))
+
+    run: Mapped[Run] = relationship(back_populates="human_decisions")
 
 
 class Artifact(Base):

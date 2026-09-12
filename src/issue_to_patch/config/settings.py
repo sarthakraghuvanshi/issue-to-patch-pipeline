@@ -30,6 +30,16 @@ class LLMProvider(StrEnum):
     OPENAI = "openai"
 
 
+class AgentMode(StrEnum):
+    """Sprint 5's one-LLM-call analysis/drafting, or Sprint 7's six-specialist
+    pipeline (Phase 6) doing the same job in named, individually-inspectable
+    steps. Both produce the same state shape, so the rest of the graph
+    (validation, the human gate, revise-or-reject) doesn't know which ran."""
+
+    SINGLE = "single"
+    MULTI = "multi"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ITP_",
@@ -72,6 +82,9 @@ class Settings(BaseSettings):
     # --- router thresholds (tuned by the feedback loop, never hard-coded in nodes) ---
     retrieval_confidence_floor: float = Field(default=0.35, ge=0.0, le=1.0)
     max_patch_revisions: int = Field(default=1, ge=0)
+
+    # --- reasoning engine (Sprint 7) -----------------------------------
+    agent_mode: AgentMode = AgentMode.SINGLE
 
     # --- API (Sprint 6) ------------------------------------------------
     # None disables auth — fine for local dev, never for staging/prod (checked

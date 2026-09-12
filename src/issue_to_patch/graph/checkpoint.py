@@ -47,6 +47,7 @@ _STATE_MODELS: list[tuple[str, str]] = [
     ("issue_to_patch.graph.state", "Hypothesis"),
     ("issue_to_patch.graph.state", "InvestigationPlan"),
     ("issue_to_patch.graph.state", "HumanDecision"),
+    ("issue_to_patch.graph.state", "ReviewerRole"),
     ("issue_to_patch.graph.state", "EvaluationReport"),
     ("issue_to_patch.ingestion.models", "IssueSource"),
     ("issue_to_patch.ingestion.models", "IssueRequest"),

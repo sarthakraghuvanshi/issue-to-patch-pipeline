@@ -50,6 +50,7 @@ from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.ingestion.snapshot import load_snapshot
 from issue_to_patch.patching.models import PatchArtifact, ValidationReport
 from issue_to_patch.patching.validate import validate_patch
+from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
 from issue_to_patch.retrieval import RetrievalService, SearchFilters
 
 _AUTHED = [Depends(require_auth), Depends(rate_limit)]
@@ -58,6 +59,7 @@ runs_router = APIRouter(prefix="/runs", tags=["runs"], dependencies=_AUTHED)
 tools_router = APIRouter(tags=["tools"], dependencies=_AUTHED)
 
 _VALID_DECISIONS = {"approve", "reject", "revise"}
+_VALID_ROLES = {"gatekeeper", "auditor", "strategist"}
 
 
 def _load_snapshot_or_400(path: str) -> RepositorySnapshot:
@@ -140,11 +142,16 @@ def approve_run(
 ) -> RunStateResponse:
     if body.decision not in _VALID_DECISIONS:
         raise HTTPException(422, f"decision must be one of {sorted(_VALID_DECISIONS)}")
+    if body.role not in _VALID_ROLES:
+        raise HTTPException(422, f"role must be one of {sorted(_VALID_ROLES)}")
     handle = _load_or_404(run_id, deps, checkpointer)
     if not handle.awaiting_human:
         raise HTTPException(409, "run is not awaiting human review")
     resumed = resume_investigation(
-        handle, HumanDecision(decision=body.decision, reason=body.reason)
+        handle,
+        HumanDecision(
+            decision=body.decision, reason=body.reason, reviewer=body.reviewer, role=body.role
+        ),
     )
     return _to_response(resumed)
 
@@ -180,6 +187,16 @@ def get_patch(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) ->
         changed_files=patch.changed_files,
         patch_text=patch.patch_text,
     )
+
+
+@runs_router.get("/{run_id}/audit", response_model=AuditTrail)
+def get_audit_trail(run_id: str, store: StoreDep) -> AuditTrail:
+    """Every tool call and human decision for this run, in order, with both
+    append-only hash chains verified (Phase 8's Auditor role)."""
+    trail = build_audit_trail(store, run_id)
+    if not trail.found:
+        raise HTTPException(404, f"no such run: {run_id}")
+    return trail
 
 
 @tools_router.post("/search", response_model=SearchResponse)

@@ -8,10 +8,11 @@ from issue_to_patch.graph.state import (
     Evidence,
     HumanDecision,
     Hypothesis,
+    ReviewerRole,
     SourceLocation,
     new_state,
 )
-from issue_to_patch.patching.models import CheckResult, CheckStatus, ValidationReport
+from issue_to_patch.patching.models import CheckResult, CheckStatus, PatchArtifact, ValidationReport
 from issue_to_patch.run_states import RunState
 
 _SETTINGS = Settings(retrieval_confidence_floor=0.35, max_patch_revisions=1)
@@ -19,6 +20,17 @@ _SETTINGS = Settings(retrieval_confidence_floor=0.35, max_patch_revisions=1)
 
 def _loc(chunk_id: str = "c1") -> SourceLocation:
     return SourceLocation(chunk_id=chunk_id, path="a.py", line_start=1, line_end=2)
+
+
+def _patch(changed_files: list[str]) -> PatchArtifact:
+    return PatchArtifact(
+        base_sha="a",
+        commit_sha="b",
+        changed_files=changed_files,
+        added_lines=1,
+        removed_lines=0,
+        patch_text="diff --git",
+    )
 
 
 def test_missing_issue_or_repository_goes_to_persist_run() -> None:
@@ -131,8 +143,6 @@ def test_failed_edit_application_gives_up_once_budget_is_exhausted() -> None:
 
 
 def test_applied_patch_proceeds_to_validation() -> None:
-    from issue_to_patch.patching.models import PatchArtifact
-
     state = new_state(run_id="r1", issue_ref="x")
     state["candidate_patch"] = PatchArtifact(
         base_sha="a",
@@ -198,3 +208,27 @@ def test_human_revise_request_gives_up_once_budget_is_exhausted() -> None:
     state["human_decision"] = HumanDecision(decision="revise")
     state["revisions_used"] = 1
     assert router.route_after_human(state, _SETTINGS) == router.PERSIST_RUN
+
+
+def test_gatekeeper_approval_of_a_risky_patch_proceeds_to_evaluation() -> None:
+    state = new_state(run_id="r1", issue_ref="x")
+    state["candidate_patch"] = _patch([".github/workflows/deploy.yml"])
+    state["human_decision"] = HumanDecision(decision="approve", role=ReviewerRole.GATEKEEPER)
+    assert router.approval_is_authorized(state) is True
+    assert router.route_after_human(state, _SETTINGS) == router.EVALUATE_RUN
+
+
+def test_non_gatekeeper_approval_of_a_risky_patch_is_not_authorized() -> None:
+    state = new_state(run_id="r1", issue_ref="x")
+    state["candidate_patch"] = _patch([".github/workflows/deploy.yml"])
+    state["human_decision"] = HumanDecision(decision="approve", role=ReviewerRole.AUDITOR)
+    assert router.approval_is_authorized(state) is False
+    assert router.route_after_human(state, _SETTINGS) == router.PERSIST_RUN
+
+
+def test_any_role_can_approve_a_non_risky_patch() -> None:
+    state = new_state(run_id="r1", issue_ref="x")
+    state["candidate_patch"] = _patch(["src/calculator.py"])
+    state["human_decision"] = HumanDecision(decision="approve", role=ReviewerRole.STRATEGIST)
+    assert router.approval_is_authorized(state) is True
+    assert router.route_after_human(state, _SETTINGS) == router.EVALUATE_RUN

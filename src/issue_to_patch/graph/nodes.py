@@ -18,6 +18,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from issue_to_patch.graph.deps import GraphDependencies
+from issue_to_patch.graph.router import approval_is_authorized
 from issue_to_patch.graph.state import (
     EvaluationReport,
     Evidence,
@@ -306,9 +307,20 @@ def request_human_validation(
 ) -> dict[str, object]:
     """The interrupt point. The graph pauses *before* this node runs; by the time
     it actually executes (on resume) ``human_decision`` has already been written
-    into state by the caller via ``graph.update_state``."""
-    if state.get("human_decision") is None:
+    into state by the caller via ``graph.update_state``. Persisting it here (not
+    just leaving it in the checkpoint) is what makes it show up in the audit
+    trail (persistence/audit.py) — the checkpoint is for resuming a run, the
+    Store is the durable record of what was decided."""
+    decision = state.get("human_decision")
+    if decision is None:
         return {"errors": ["request_human_validation: resumed with no human_decision set"]}
+    deps.store.record_human_decision(
+        state["run_id"],
+        role=decision.role.value,
+        reviewer=decision.reviewer,
+        decision=decision.decision,
+        reason=decision.reason,
+    )
     return {}
 
 
@@ -346,7 +358,11 @@ def _determine_final_state(state: InvestigationState) -> RunState:
     decision = state.get("human_decision")
     if decision is not None:
         if decision.decision == "approve":
-            return RunState.PATCH_VALIDATED
+            if approval_is_authorized(state):
+                return RunState.PATCH_VALIDATED
+            # Right decision, wrong authority: a risky patch needs the
+            # Gatekeeper specifically — still not a rejection, just not final.
+            return RunState.PATCH_REQUIRES_HUMAN_REVIEW
         if decision.decision == "reject":
             return RunState.PATCH_REJECTED
         return RunState.PATCH_REQUIRES_HUMAN_REVIEW  # "revise" with no budget left

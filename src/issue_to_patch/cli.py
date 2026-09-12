@@ -307,49 +307,87 @@ def build_eval_set(
 
 @app.command()
 def investigate(
-    issue: Annotated[str, typer.Option(help="Issue URL, owner/repo#n, fixture path, or raw text")],
+    issue: Annotated[
+        str | None, typer.Option(help="Issue URL, owner/repo#n, fixture path, or raw text")
+    ] = None,
     snapshot: Annotated[
-        Path, typer.Option(help="Snapshot dir (from `ingest`) — must already be `index`ed")
-    ],
+        Path | None, typer.Option(help="Snapshot dir (from `ingest`) — must already be `index`ed")
+    ] = None,
     scope: Annotated[
         list[str] | None, typer.Option(help="Glob(s) the patch must stay within")
+    ] = None,
+    resume: Annotated[
+        str | None, typer.Option(help="Resume an existing run_id instead of starting a new one")
     ] = None,
     decision: Annotated[
         str | None,
         typer.Option(help="Resolve the human gate immediately: approve | reject | revise"),
     ] = None,
     reason: Annotated[str, typer.Option(help="Reason recorded with --decision")] = "",
+    reviewer: Annotated[str, typer.Option(help="Name recorded with --decision")] = "human",
+    role: Annotated[
+        str, typer.Option(help="gatekeeper | auditor | strategist — see safety/permissions.py")
+    ] = "gatekeeper",
 ) -> None:
     """Run the reasoning graph on an issue: investigate, draft a patch, pause for review.
 
-    Runs entirely within this process — the checkpointer is in-memory (see
-    ``graph/checkpoint.py``), so resuming a paused run from a *separate*
-    ``investigate`` invocation isn't possible yet. Pass ``--decision`` to
-    resolve the human gate immediately and see the run through to a final
-    state in one command; omit it to stop at the pending review and inspect it.
+    Uses the same durable (SQLite-file) checkpointer as the API, under
+    ``<artifacts_dir>/checkpoints.db`` — a run started here can be resumed by
+    a later ``investigate --resume <run_id>``, or by the API, and vice versa.
+    Pass ``--decision`` to resolve the human gate immediately; omit it to stop
+    at the pending review and inspect it first.
     """
     from issue_to_patch.graph import (
         GraphDependencies,
         HumanDecision,
         build_dependencies,
+        load_investigation,
         resume_investigation,
+        sqlite_checkpointer,
         start_investigation,
     )
     from issue_to_patch.ingestion.snapshot import load_snapshot
     from issue_to_patch.persistence import Store
 
     settings = get_settings()
-    snap = load_snapshot(snapshot)
     store = Store(settings.database_url)
-    if not store.indexed_paths(snap.repo or snap.source, snap.commit_sha):
-        typer.echo("no chunks indexed for this snapshot — run `index` first", err=True)
-        raise typer.Exit(2)
-
     deps: GraphDependencies = build_dependencies(store=store, settings=settings)
-    handle = start_investigation(issue_ref=issue, repository=snap, deps=deps, allowed_scope=scope)
+    checkpointer = sqlite_checkpointer(settings.artifacts_dir / "checkpoints.db")
+
+    if resume:
+        from issue_to_patch.graph import UnknownRun
+
+        try:
+            handle = load_investigation(resume, deps, checkpointer=checkpointer)
+        except UnknownRun:
+            typer.echo(f"no such run: {resume}", err=True)
+            raise typer.Exit(2) from None
+    else:
+        if not issue or not snapshot:
+            typer.echo("give --issue and --snapshot, or --resume <run_id>", err=True)
+            raise typer.Exit(2)
+        snap = load_snapshot(snapshot)
+        if not store.indexed_paths(snap.repo or snap.source, snap.commit_sha):
+            typer.echo("no chunks indexed for this snapshot — run `index` first", err=True)
+            raise typer.Exit(2)
+        handle = start_investigation(
+            issue_ref=issue,
+            repository=snap,
+            deps=deps,
+            allowed_scope=scope,
+            checkpointer=checkpointer,
+        )
 
     if decision and handle.awaiting_human:
-        handle = resume_investigation(handle, HumanDecision(decision=decision, reason=reason))
+        if decision not in {"approve", "reject", "revise"}:
+            typer.echo("--decision must be one of approve | reject | revise", err=True)
+            raise typer.Exit(2)
+        if role not in {"gatekeeper", "auditor", "strategist"}:
+            typer.echo("--role must be one of gatekeeper | auditor | strategist", err=True)
+            raise typer.Exit(2)
+        handle = resume_investigation(
+            handle, HumanDecision(decision=decision, reason=reason, reviewer=reviewer, role=role)
+        )
 
     state = handle.state
     typer.echo(f"run_id:        {handle.run_id}")
@@ -374,6 +412,23 @@ def investigate(
     assert final_state is not None  # PersistRun always sets it once the graph reaches END
     typer.echo(f"state:         {final_state.value}")
     raise typer.Exit(_EXIT_CODES[final_state])
+
+
+@app.command()
+def audit(
+    run_id: Annotated[str, typer.Argument(help="run_id from `investigate` or `POST /runs`")],
+) -> None:
+    """Print a run's full audit trail: every tool call and human decision, in
+    order, with both append-only hash chains verified (Phase 8)."""
+    from issue_to_patch.persistence import Store, build_audit_trail, render_audit_trail
+
+    store = Store(get_settings().database_url)
+    trail = build_audit_trail(store, run_id)
+    typer.echo(render_audit_trail(trail))
+    if not trail.found:
+        raise typer.Exit(1)
+    if not trail.is_tamper_evident_intact:
+        raise typer.Exit(3)
 
 
 if __name__ == "__main__":
