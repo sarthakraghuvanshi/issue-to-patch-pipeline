@@ -16,6 +16,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pgvector>=0.3",
     "langgraph>=0.2",
+    "langgraph-checkpoint-sqlite>=3.1.1",
     "langchain-core>=0.3",
     "anthropic>=0.40",
     "openai>=1.50",

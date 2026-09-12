@@ -11,7 +11,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     retrieval_confidence_floor: float = Field(default=0.35, ge=0.0, le=1.0)
     max_patch_revisions: int = Field(default=1, ge=0)
 
+    # --- API (Sprint 6) ------------------------------------------------
+    # None disables auth — fine for local dev, never for staging/prod (checked
+    # at startup, not just documented, so a forgotten key fails loud).
+    api_key: SecretStr | None = None
+    api_rate_limit_per_minute: int = Field(default=60, ge=1)
+
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -80,6 +86,17 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_artifacts_dir(cls, value: Path) -> Path:
         return value.expanduser()
+
+    @model_validator(mode="after")
+    def _api_key_required_in_deployed_environments(self) -> Settings:
+        # local/ci run the API in-process against a test client, never exposed
+        # to a network — staging/prod are reachable, so an unauthenticated API
+        # there is a real hole, not just a missing convenience.
+        if self.environment in (Environment.STAGING, Environment.PROD) and self.api_key is None:
+            raise ValueError(
+                f"ITP_API_KEY is required when ITP_ENVIRONMENT={self.environment.value!r}"
+            )
+        return self
 
     @property
     def is_production(self) -> bool:

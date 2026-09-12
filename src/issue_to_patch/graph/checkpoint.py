@@ -1,12 +1,17 @@
-"""Checkpointer for the reasoning graph.
+"""Checkpointers for the reasoning graph.
 
-``MemorySaver`` is process-local: it lets a run pause at the human-review node
-and resume later *within the same process* (what Sprint 5's tests and CLI
-demo exercise), but it does not survive a process restart. A durable
-checkpointer (SQLite locally, Postgres in staging/prod, keyed by the same
-``database_url`` the rest of the app already uses) is Sprint 6's
-persistence/resumability work, so a run can be approved from a different
-process — e.g. an API call hitting a worker that isn't the one that paused it.
+Two flavors, same allowlist:
+
+* :func:`default_checkpointer` — process-local (``MemorySaver``). A run can
+  pause at the human-review node and resume later *within the same process*
+  (Sprint 5's tests and the `investigate` CLI demo). Gone once the process
+  exits.
+* :func:`sqlite_checkpointer` — a file on disk. The API (Sprint 6) uses this
+  one so a run started by one HTTP request can be approved by a completely
+  different request — even a different worker process — because the paused
+  state lives in the file, not in a Python object only that first request held.
+  A Postgres-backed equivalent for staging/prod is a drop-in swap behind the
+  same ``BaseCheckpointSaver`` interface once that infra is actually running.
 
 The state carries Pydantic models (``Evidence``, ``Hypothesis``, ...) as
 values, not just plain dicts, so every claim keeps its type. LangGraph's
@@ -18,8 +23,12 @@ check off wholesale.
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 _STATE_MODELS: list[tuple[str, str]] = [
     ("issue_to_patch.graph.state", "SourceLocation"),
@@ -38,7 +47,20 @@ _STATE_MODELS: list[tuple[str, str]] = [
 ]
 
 
-def default_checkpointer() -> MemorySaver:
+def default_checkpointer() -> BaseCheckpointSaver[str]:
     """A fresh, process-local checkpointer with our state models allowlisted."""
-    serde = JsonPlusSerializer(allowed_msgpack_modules=list(_STATE_MODELS))
-    return MemorySaver(serde=serde)
+    return MemorySaver().with_allowlist(_STATE_MODELS)
+
+
+def sqlite_checkpointer(db_path: str | Path) -> BaseCheckpointSaver[str]:
+    """A checkpointer backed by a SQLite file at ``db_path``, allowlisted the
+    same way. Creates its tables (idempotent) if they don't exist yet.
+    """
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # check_same_thread=False: FastAPI may run a sync dependency in a
+    # worker thread different from the one that opened the connection.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    saver = SqliteSaver(conn)
+    saver.setup()
+    return saver.with_allowlist(_STATE_MODELS)

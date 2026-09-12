@@ -14,12 +14,17 @@ from dataclasses import dataclass
 from typing import cast
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from issue_to_patch.graph.build import InvestigationGraph, build_graph
 from issue_to_patch.graph.deps import GraphDependencies
 from issue_to_patch.graph.state import HumanDecision, InvestigationState, new_state
 from issue_to_patch.ingestion.models import RepositorySnapshot, stable_hash
 from issue_to_patch.logging import bind_run_id
+
+
+class UnknownRun(KeyError):
+    """No checkpoint exists for this run_id (never started, or a different store)."""
 
 
 @dataclass
@@ -41,10 +46,17 @@ def start_investigation(
     deps: GraphDependencies,
     allowed_scope: list[str] | None = None,
     run_id: str | None = None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
 ) -> InvestigationHandle:
-    """Create the run row, then drive the graph to its first pause or END."""
+    """Create the run row, then drive the graph to its first pause or END.
+
+    ``checkpointer`` defaults to the process-local one (fine for the CLI and
+    tests); pass a durable one (``graph.checkpoint.sqlite_checkpointer``) so a
+    *different* request/process can later inspect or resume this same run —
+    that's what the API does.
+    """
     run_id = run_id or uuid.uuid4().hex[:16]
-    graph = build_graph(deps)
+    graph = build_graph(deps, checkpointer=checkpointer)
     initial = new_state(run_id=run_id, issue_ref=issue_ref, allowed_scope=allowed_scope)
     initial["repository"] = repository
 
@@ -61,15 +73,31 @@ def start_investigation(
     return _handle(run_id, graph, result)
 
 
+def load_investigation(
+    run_id: str, deps: GraphDependencies, *, checkpointer: BaseCheckpointSaver[str]
+) -> InvestigationHandle:
+    """Rebuild a handle for a run this process never itself started — the
+    read path for a fresh HTTP request (``GET /runs/{id}``) or the first half
+    of resuming one (``POST /runs/{id}/approve``) from a durable checkpoint.
+    """
+    graph = build_graph(deps, checkpointer=checkpointer)
+    snapshot = graph.get_state(_config(run_id))
+    if not snapshot.values:
+        raise UnknownRun(run_id)
+    state = cast(InvestigationState, snapshot.values)
+    return InvestigationHandle(
+        run_id=run_id, graph=graph, state=state, awaiting_human=bool(snapshot.next)
+    )
+
+
 def resume_investigation(
     handle: InvestigationHandle, decision: HumanDecision
 ) -> InvestigationHandle:
     """Inject the human's decision and drive the graph the rest of the way.
 
-    Only valid within the process that called :func:`start_investigation` —
-    the checkpointer is in-memory (see ``graph/checkpoint.py``). Resuming a
-    paused run from a *different* process is Sprint 6's durable-checkpointer
-    work.
+    Works on a handle from either :func:`start_investigation` or
+    :func:`load_investigation` — only ``handle.graph`` (already bound to
+    whichever checkpointer built it) and the run_id matter here.
     """
     config = _config(handle.run_id)
     with bind_run_id(handle.run_id):

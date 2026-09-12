@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help install up down logs lint fmt type test check migrate run-cli serve clean
+.PHONY: help install up down logs lint fmt type test check migrate run-cli serve openapi clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -43,8 +43,11 @@ reset-db: ## Delete the local SQLite DB (dev only; re-index afterwards)
 run-cli: ## Run the CLI, e.g. `make run-cli ARGS="version"`
 	uv run issue-to-patch $(ARGS)
 
-serve: ## Run the API locally (added in Sprint 6)
+serve: ## Run the API locally
 	uv run uvicorn issue_to_patch.api.app:app --reload
+
+openapi: ## Regenerate openapi.json from the live app (run after a route change)
+	uv run python scripts/generate_openapi.py
 
 demo: ## Sprint 1 hands-on: build a buggy repo and fix it end to end
 	bash examples/try_sprint1.sh

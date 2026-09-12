@@ -19,8 +19,12 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 - [x] Milestone 2 gate — 20 labeled issues over langchain-ai/langchain (3,125 files); hybrid
       beats BM25 (see [evals/README.md](evals/README.md)) — hybrid stays the default mode
 - [x] Sprint 5 — single-agent LangGraph reasoning engine (12 nodes, deterministic router,
-      human-review gate, real Anthropic provider); `investigate`
-- [ ] Sprint 6 — OpenAPI service + durable (cross-process) resumability
+      human-review gate, real Anthropic + OpenAI providers); `investigate`
+- [x] Sprint 6 — FastAPI service (`POST /runs`, `GET /runs/{id}`, `.../approve`,
+      `.../retrieval`, `.../patch`, `/search`, `/validate-patch`) over a durable
+      (SQLite-file) checkpointer — a run started by one request can be approved by a
+      completely different one, even after a process restart. `make serve`
+- [ ] Sprint 7 — multi-agent + human validation roles + tamper-evident audit
 
 ## Quickstart
 
@@ -68,8 +72,21 @@ uv run issue-to-patch investigate --issue "add() returns the wrong result" \
 # then pauses (exit 10) until you resolve it:
 uv run issue-to-patch investigate --issue "..." --snapshot ... --decision approve
 # --decision is only resumable within the same process/invocation for now — the
-# checkpointer is in-memory; a durable one (so `approve` can come from a separate
-# command, or an API call) is Sprint 6.
+# checkpointer is in-memory; the API (below) uses a durable one instead.
+
+# Sprint 6: the same investigation, over HTTP — a run started here can be approved
+# by a completely separate request (or process), because state lives in a SQLite
+# file, not in memory:
+make serve   # uvicorn on :8000; docs at /docs, contract at /openapi.json
+curl -s localhost:8000/runs -X POST -H 'content-type: application/json' -d '{
+  "issue": "add() returns the wrong result",
+  "snapshot": "artifacts/<run_id>/snapshot",
+  "scope": ["src/**"]
+}'   # -> {"run_id": "...", "status": "AWAITING_HUMAN_REVIEW", "hypothesis": {...}, ...}
+curl -s localhost:8000/runs/<run_id>/approve -X POST -H 'content-type: application/json' \
+  -d '{"decision": "approve"}'
+# set ITP_API_KEY and send `Authorization: Bearer <key>` once this leaves local dev —
+# Settings refuses to start with no key in staging/prod.
 ```
 
 > The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
@@ -91,8 +108,17 @@ uv run issue-to-patch investigate --issue "..." --snapshot ... --decision approv
 | `src/issue_to_patch/evaluation/` | metrics, grounded LLM judge, cost |
 | `src/issue_to_patch/safety/` | allowlists, sandbox, stress tests |
 | `src/issue_to_patch/persistence/` | SQL / vector / object-storage adapters |
-| `src/issue_to_patch/api/` | FastAPI + generated OpenAPI |
+| `src/issue_to_patch/api/` | FastAPI: schemas, thin routes, auth + rate-limit deps; `openapi.json` committed at repo root (`make openapi` to regenerate, checked by a contract test) |
 
 ## Configuration
 
 Copy `.env.example` to `.env`. All variables are prefixed `ITP_`.
+
+## What Sprint 6 deliberately leaves out
+
+`POST /runs` runs the graph **synchronously in the request** rather than enqueuing
+it to a background worker (`arq` + Redis, per the original plan). The durable SQLite
+checkpointer already delivers the property that actually matters — a paused run can
+be approved from a separate request or process — without needing Redis running in
+this environment. A real job queue is a drop-in addition once that infra exists: the
+graph and checkpointer don't change, only *who* calls `graph.invoke()`.
