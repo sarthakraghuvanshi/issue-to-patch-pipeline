@@ -15,6 +15,8 @@ Every other node is as deterministic as Sprints 1-4 already made it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 
 from issue_to_patch.config.settings import AgentMode
@@ -28,7 +30,7 @@ from issue_to_patch.graph.state import (
     InvestigationState,
     SourceLocation,
 )
-from issue_to_patch.ingestion.models import IssueRequest
+from issue_to_patch.ingestion.models import IssueRequest, stable_hash
 from issue_to_patch.ingestion.normalize import normalize_issue
 from issue_to_patch.llm.client import Message
 from issue_to_patch.logging import get_logger
@@ -388,16 +390,40 @@ def evaluate_run(state: InvestigationState, deps: GraphDependencies) -> dict[str
 def persist_run(state: InvestigationState, deps: GraphDependencies) -> dict[str, object]:
     final_state = _determine_final_state(state)
     validation = state.get("validation")
-    deps.store.finish_run(state["run_id"], state=final_state.value)
+    patch = state.get("candidate_patch")
+    run_dir = deps.settings.artifacts_dir / state["run_id"]
+
+    deps.store.finish_run(state["run_id"], state=final_state.value, cost_usd=deps.llm.cost_usd)
+
     if validation is not None:
+        validation_json = validation.model_dump_json(indent=2)
+        validation_hash = stable_hash(validation_json)
         deps.store.record_tool_call(
             state["run_id"],
             tool="validate_patch",
             args_redacted="{}",
-            result_hash=validation.model_dump_json(),
+            result_hash=validation_hash,  # a real hash, not the JSON itself
         )
+        path = _write(run_dir / "validation.json", validation_json)
+        deps.store.record_artifact(
+            state["run_id"], kind="validation", uri=str(path), content_hash=validation_hash
+        )
+
+    if patch is not None:
+        patch_hash = stable_hash(patch.normalized_for_hash())
+        path = _write(run_dir / "fix.patch", patch.patch_text)
+        deps.store.record_artifact(
+            state["run_id"], kind="patch", uri=str(path), content_hash=patch_hash
+        )
+
     _log.info("graph.persist_run", run_id=state["run_id"], final_state=final_state.value)
     return {"final_state": final_state}
+
+
+def _write(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, "utf-8")
+    return path
 
 
 def _determine_final_state(state: InvestigationState) -> RunState:

@@ -39,8 +39,14 @@ def deps_and_repo(fixture_repo: Path, tmp_path: Path):
     store.create_all()
     index_snapshot(snap, store)
     llm = FakeLLM()
+    # artifacts_dir must not default to "artifacts" (relative to cwd) — PersistRun
+    # writes a real fix.patch/validation.json per run, and would otherwise leak
+    # test output into the actual project's artifacts/ directory.
     deps = GraphDependencies(
-        llm=llm, retrieval=RetrievalService(store), store=store, settings=Settings()
+        llm=llm,
+        retrieval=RetrievalService(store),
+        store=store,
+        settings=Settings(artifacts_dir=tmp_path / "artifacts"),
     )
     return deps, snap
 
@@ -82,7 +88,21 @@ def test_full_run_pauses_at_human_gate_then_approves_to_patch_validated(deps_and
     assert trail.found is True
     assert trail.is_tamper_evident_intact is True
     assert [d.reviewer for d in trail.decisions] == ["alice"]
-    assert any(t.tool == "validate_patch" for t in trail.tool_calls)
+    validate_call = next(t for t in trail.tool_calls if t.tool == "validate_patch")
+    # result_hash must be an actual hash (fixed-length hex), never the raw
+    # validation JSON itself - that was a real bug: readable but not a hash.
+    assert len(validate_call.result_hash) == 64
+    int(validate_call.result_hash, 16)  # raises if it isn't hex
+
+    # PersistRun writes the patch/validation to real files and records them
+    # as artifacts, exactly like Sprint 1's deterministic pipeline already
+    # did - the graph path was missing this until Sprint 8.
+    artifacts = {a.kind: a for a in deps.store.list_artifacts(handle.run_id)}
+    assert "patch" in artifacts and "validation" in artifacts
+    from pathlib import Path
+
+    assert "diff --git" in Path(artifacts["patch"].uri).read_text("utf-8")
+    assert "PATCH_VALIDATED" in Path(artifacts["validation"].uri).read_text("utf-8")
 
 
 def test_risky_patch_needs_the_gatekeeper_role_specifically(deps_and_repo) -> None:

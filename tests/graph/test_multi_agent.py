@@ -35,7 +35,7 @@ def multi_agent_deps(fixture_repo: Path, tmp_path: Path):
         llm=llm,
         retrieval=RetrievalService(store),
         store=store,
-        settings=Settings(agent_mode=AgentMode.MULTI),
+        settings=Settings(agent_mode=AgentMode.MULTI, artifacts_dir=tmp_path / "artifacts"),
     )
     return deps, snap
 

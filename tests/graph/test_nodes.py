@@ -36,7 +36,7 @@ def _deps(tmp_path: Path, llm: FakeLLM | None = None) -> GraphDependencies:
         llm=llm or FakeLLM(),
         retrieval=RetrievalService(store),
         store=store,
-        settings=Settings(),
+        settings=Settings(artifacts_dir=tmp_path / "artifacts"),
     )
 
 
@@ -86,7 +86,10 @@ def indexed(indexable_repo: Path, tmp_path: Path) -> tuple[GraphDependencies, Re
     from issue_to_patch.config.settings import Settings
 
     deps = GraphDependencies(
-        llm=FakeLLM(), retrieval=RetrievalService(store), store=store, settings=Settings()
+        llm=FakeLLM(),
+        retrieval=RetrievalService(store),
+        store=store,
+        settings=Settings(artifacts_dir=tmp_path / "artifacts"),
     )
     return deps, snap
 
@@ -382,3 +385,15 @@ def test_persist_run_determines_the_right_final_state(tmp_path, build_state, exp
     out = nodes.persist_run(state, deps)
     assert out["final_state"] is expected
     assert deps.store.get_run_state("r1") == expected.value
+
+
+def test_persist_run_records_the_llms_tracked_cost(tmp_path: Path) -> None:
+    llm = FakeLLM(cost_usd=0.0042)
+    deps = _deps(tmp_path, llm)
+    deps.store.create_run(run_id="r1", issue_ref="x", repo=None, commit_sha=None, content_hash="h")
+    state = new_state(run_id="r1", issue_ref="x")
+    nodes.persist_run(state, deps)
+
+    run = deps.store.get_run("r1")
+    assert run is not None
+    assert run.cost_usd == 0.0042

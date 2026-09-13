@@ -30,7 +30,10 @@ def _deps(tmp_path: Path, llm: FakeLLM | None = None) -> GraphDependencies:
     store = Store(f"sqlite+pysqlite:///{tmp_path / 'g.db'}")
     store.create_all()
     return GraphDependencies(
-        llm=llm or FakeLLM(), retrieval=RetrievalService(store), store=store, settings=Settings()
+        llm=llm or FakeLLM(),
+        retrieval=RetrievalService(store),
+        store=store,
+        settings=Settings(artifacts_dir=tmp_path / "artifacts"),
     )
 
 

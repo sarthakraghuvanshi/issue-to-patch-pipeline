@@ -104,7 +104,10 @@ def test_a_full_run_never_hits_a_blocked_or_warned_type(
     )
     llm.queue_structured(_FIX)
     deps = GraphDependencies(
-        llm=llm, retrieval=RetrievalService(store), store=store, settings=Settings()
+        llm=llm,
+        retrieval=RetrievalService(store),
+        store=store,
+        settings=Settings(artifacts_dir=tmp_path / "artifacts"),
     )
     checkpointer = (
         default_checkpointer()

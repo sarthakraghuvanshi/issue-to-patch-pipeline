@@ -48,6 +48,13 @@ class Completion:
 class LLMClient(Protocol):
     """Every provider implementation satisfies this."""
 
+    @property
+    def cost_usd(self) -> float:
+        """Running total for this client instance — Sprint 8's PersistRun reads
+        this once, at the end of a run, to fill in Run.cost_usd. Always 0.0 for
+        FakeLLM; real providers accumulate it in ``_record_usage``."""
+        ...
+
     def complete(self, messages: Sequence[Message]) -> Completion: ...
 
     def structured(self, messages: Sequence[Message], schema: type[T]) -> T: ...
@@ -65,6 +72,7 @@ class FakeLLM:
     _text_replies: deque[str] = field(default_factory=deque)
     _structured_replies: deque[dict[str, object]] = field(default_factory=deque)
     calls: list[list[Message]] = field(default_factory=list)
+    cost_usd: float = 0.0  # fake calls are free
 
     def queue_text(self, *replies: str) -> None:
         self._text_replies.extend(replies)
