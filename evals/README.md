@@ -16,7 +16,9 @@ Workflow (automated):
 2. `issue-to-patch build-eval-set --repo <owner/name> --commit-sha <indexed sha> --count 20`
    — mines merged bug-fix PRs (issue text -> the files that actually fixed it) and writes
    this file. See `retrieval/dataset.py` for how a PR qualifies.
-3. `issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl`
+3. `issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl` (or `make eval` /
+   `issue-to-patch eval-suite --labeled evals/labeled_issues.jsonl`, which writes the same
+   numbers plus a comparable JSON+HTML report to `evals/report.{json,html}` — Sprint 8)
 
 Rows can also be added by hand: read a closed issue, follow its linking PR, copy the
 changed file(s)/symbol(s) into the schema above.

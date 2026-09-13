@@ -431,5 +431,102 @@ def audit(
         raise typer.Exit(3)
 
 
+@app.command()
+def judge(run_id: Annotated[str, typer.Argument(help="run_id to judge")]) -> None:
+    """Score one completed run on the 5 grounded dimensions (Phase 9) — never
+    the sole success signal, just an additional comparable one stored
+    alongside the run's own deterministic RunState."""
+    from issue_to_patch.evaluation import judge_run
+    from issue_to_patch.graph import (
+        UnknownRun,
+        build_dependencies,
+        load_investigation,
+        sqlite_checkpointer,
+    )
+    from issue_to_patch.persistence import Store
+
+    settings = get_settings()
+    store = Store(settings.database_url)
+    deps = build_dependencies(store=store, settings=settings)
+    checkpointer = sqlite_checkpointer(settings.artifacts_dir / "checkpoints.db")
+    try:
+        handle = load_investigation(run_id, deps, checkpointer=checkpointer)
+    except UnknownRun:
+        typer.echo(f"no such run: {run_id}", err=True)
+        raise typer.Exit(2) from None
+
+    record = judge_run(run_id, handle.state, deps)
+    typer.echo(record.model_dump_json(indent=2))
+
+
+@app.command("eval-suite")
+def eval_suite(
+    labeled: Annotated[
+        Path | None, typer.Option(help="Path to labeled_issues.jsonl for retrieval metrics")
+    ] = None,
+    top_k: Annotated[int, typer.Option(help="Cutoff for retrieval")] = 10,
+    run_id: Annotated[
+        list[str] | None,
+        typer.Option("--run-id", help="Already-completed run_id to include (repeatable)"),
+    ] = None,
+    judge_runs: Annotated[
+        bool,
+        typer.Option(
+            "--judge", help="Also run the LLM judge on each --run-id (uses ITP_LLM_PROVIDER)"
+        ),
+    ] = False,
+    out_json: Annotated[Path, typer.Option(help="Write the JSON report here")] = Path(
+        "evals/report.json"
+    ),
+    out_html: Annotated[Path, typer.Option(help="Write the HTML report here")] = Path(
+        "evals/report.html"
+    ),
+) -> None:
+    """Build the evaluation suite report (Phase 9): retrieval metrics from a
+    labeled set and/or deterministic + judge metrics from already-completed
+    runs. Give --labeled, --run-id (repeatable), or both — driving brand new
+    graph runs from scratch isn't done here; point --run-id at runs you
+    already made (with a real provider, or FakeLLM for a plumbing smoke test).
+    """
+    from issue_to_patch.config.settings import LLMProvider
+    from issue_to_patch.evaluation import build_suite_report, render_suite_report_html
+    from issue_to_patch.graph import build_dependencies
+    from issue_to_patch.persistence import Store
+    from issue_to_patch.retrieval.evaluation import render_report
+
+    if not labeled and not run_id:
+        typer.echo("give --labeled, --run-id (repeatable), or both", err=True)
+        raise typer.Exit(2)
+
+    settings = get_settings()
+    store = Store(settings.database_url)
+    if judge_runs and settings.llm_provider is LLMProvider.FAKE:
+        typer.echo(
+            "warning: ITP_LLM_PROVIDER=fake — judge scores will be plumbing-only, not meaningful",
+            err=True,
+        )
+    judge_deps = build_dependencies(store=store, settings=settings) if judge_runs else None
+
+    report = build_suite_report(
+        store, labeled_path=labeled, top_k=top_k, run_ids=run_id, judge_deps=judge_deps
+    )
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(report.model_dump_json(indent=2), "utf-8")
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    out_html.write_text(render_suite_report_html(report), "utf-8")
+    typer.echo(f"wrote {out_json} and {out_html}")
+
+    if report.retrieval is not None:
+        typer.echo(render_report(report.retrieval))
+    if report.suite_metrics is not None:
+        sm = report.suite_metrics
+        typer.echo(
+            f"runs={sm.run_count} patch_apply_rate={sm.patch_apply_rate:.0%} "
+            f"unrelated_file_rate={sm.unrelated_file_change_rate:.0%} "
+            f"total_cost=${sm.total_cost_usd:.4f}"
+        )
+
+
 if __name__ == "__main__":
     app()

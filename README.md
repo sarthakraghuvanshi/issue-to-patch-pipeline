@@ -31,6 +31,11 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
       Root-Cause Analyst, Patch Author, Test Strategist, Patch Reviewer — six typed,
       cited artifacts replacing the single-LLM-call analysis/drafting, behind
       `ITP_AGENT_MODE=multi`. Same graph, same validation, same human gate either way.
+- [x] Sprint 8 — evaluation: deterministic per-run/suite metrics, a grounded LLM
+      judge (never the sole success signal), `make eval` / `eval-suite` / `judge`.
+      Real cost tracking wired through (`Run.cost_usd` had existed since Sprint 1
+      but nothing filled it in) and the graph now writes its patch/validation to
+      disk like Sprint 1's deterministic pipeline always did.
 
 ## Quickstart
 
@@ -109,6 +114,12 @@ uv run issue-to-patch audit <run_id>          # or GET /runs/{run_id}/audit
 export ITP_AGENT_MODE=multi
 uv run issue-to-patch investigate --issue "add() returns the wrong result" \
   --snapshot artifacts/<run_id>/snapshot --scope 'src/**'
+
+# Sprint 8: evaluation - retrieval metrics from a labeled set, and/or deterministic +
+# judge metrics from runs you already made. make eval reuses evals/labeled_issues.jsonl:
+make eval                                    # -> evals/report.{json,html}
+uv run issue-to-patch eval-suite --run-id <run_id> --run-id <run_id2> --judge
+uv run issue-to-patch judge <run_id>          # score one run on its own
 ```
 
 > The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
@@ -127,7 +138,7 @@ uv run issue-to-patch investigate --issue "add() returns the wrong result" \
 | `src/issue_to_patch/graph/` | LangGraph reasoning engine + deterministic router |
 | `src/issue_to_patch/agents/` | the six specialists (`ITP_AGENT_MODE=multi`), each a typed, cited artifact |
 | `src/issue_to_patch/patching/` | worktree edits, `git format-patch`, deterministic validation |
-| `src/issue_to_patch/evaluation/` | metrics, grounded LLM judge, cost |
+| `src/issue_to_patch/evaluation/` | deterministic per-run/suite metrics, the grounded LLM judge, the combined `SuiteReport` (JSON + HTML) |
 | `src/issue_to_patch/safety/` | allowlists, sandbox, stress tests |
 | `src/issue_to_patch/persistence/` | SQL / vector / object-storage adapters; `audit.py` replays + verifies a run's hash-chained tool-call and human-decision trail |
 | `src/issue_to_patch/api/` | FastAPI: schemas, thin routes, auth + rate-limit deps; `openapi.json` committed at repo root (`make openapi` to regenerate, checked by a contract test) |
@@ -144,3 +155,23 @@ checkpointer already delivers the property that actually matters — a paused ru
 be approved from a separate request or process — without needing Redis running in
 this environment. A real job queue is a drop-in addition once that infra exists: the
 graph and checkpointer don't change, only *who* calls `graph.invoke()`.
+
+## What Sprint 8 deliberately leaves out
+
+- **`test_pass_rate` / `regression_rate`** in `RunMetrics` are always `None`. Measuring
+  them means actually executing a target repository's own test suite — untrusted code,
+  which the "repo content is untrusted data" principle says never runs unsandboxed.
+  That sandbox is Sprint 9's job; faking a pass rate without one would be worse than
+  admitting it isn't measured yet.
+- **Langfuse tracing** isn't wired up — it needs a running Langfuse instance (in
+  `docker-compose.yml`, never started in this environment). `LLMClient.cost_usd` and
+  the hash-chained tool-call log already give per-run cost and a full call sequence
+  without it; swapping in real tracing later doesn't change either.
+- **The feedback loop** (auto-proposing changes to BM25 weights, chunk boundaries,
+  router thresholds, agent prompts from eval results) needs a real history of eval
+  runs to learn from. With only a handful of runs so far, a feedback script would have
+  nothing to propose — worth building once `eval-suite` has actually accumulated data.
+- **A CI gate that fails on metric regression** isn't wired into `.github/workflows/ci.yml`.
+  `make eval` is real and runnable today; gating CI on it needs either `ITP_LLM_PROVIDER=fake`
+  (numbers that don't mean anything for judge scores) or a real provider key held as a
+  CI secret — a deliberate choice for whoever deploys this, not one to make silently here.
