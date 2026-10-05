@@ -104,6 +104,13 @@ class PushRequest(BaseModel):
         description="Remote you own (e.g. your own fork). Overrides "
         "ITP_PUSH_REMOTE_URL for this call if given.",
     )
+    token: str | None = Field(
+        default=None,
+        description="Your GitHub personal access token (needs 'repo' scope). Lets "
+        "anyone push over https:// using only their own token - no SSH key or git "
+        "credentials need to exist on the server at all. Ignored for an ssh/scp-style "
+        "remote_url, which carries its own credential instead.",
+    )
 
 
 class PushResponse(BaseModel):

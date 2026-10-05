@@ -52,6 +52,27 @@ def push_branch(branch_dir: Path, branch_name: str, remote_url: str) -> PushResu
     return PushResult(remote_display=display, branch=branch_name, ok=True, detail="pushed")
 
 
+def with_embedded_token(url: str, token: str) -> str:
+    """Embed ``token`` as the userinfo of an ``http(s)://`` remote, so a
+    visitor who has no git credentials configured on *this server* (the
+    common case for anyone other than its operator) can still push, using
+    nothing but their own token — no SSH key or server-side credential
+    helper involved at all.
+
+    A no-op for any other URL shape (scp-style ``git@host:...``, or a URL
+    that already carries its own userinfo) — those already carry their own
+    credential, or don't support one in the URL at all.
+    """
+    if "://" not in url:
+        return url
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or "@" in parts.netloc:
+        return url
+    return urlunsplit(
+        (parts.scheme, f"{token}@{parts.netloc}", parts.path, parts.query, parts.fragment)
+    )
+
+
 def parse_github_owner_repo(url: str) -> tuple[str, str] | None:
     """``(owner, repo)`` from a github.com remote URL — ``https://`` or
     scp-style ``git@host:owner/repo.git``. ``None`` if it doesn't look like

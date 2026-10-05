@@ -55,6 +55,7 @@ from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.ingestion.snapshot import load_snapshot
 from issue_to_patch.patching import EditApplicationError, materialize_branch, push_branch
 from issue_to_patch.patching.models import PatchArtifact
+from issue_to_patch.patching.push import with_embedded_token
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
 from issue_to_patch.pull_request import ForkRemoteNotGitHub, create_pull_request
@@ -263,6 +264,13 @@ def push_run(
             "No push remote given — pass remote_url, or set ITP_PUSH_REMOTE_URL on the "
             "server, to a remote you own (e.g. your own fork), never the upstream repository",
         )
+    # Lets anyone push with only their own token — no SSH key or git
+    # credential helper needs to exist on this server at all. The combined,
+    # credential-bearing URL only ever exists in local variables here; the
+    # response (and push_branch's own PushResult) still only ever carries
+    # the already-redacted display form.
+    if body and body.token:
+        remote_url = with_embedded_token(remote_url, body.token)
     result = push_branch(branch_dir, branch_name, remote_url)
     return PushResponse(
         run_id=run_id, ok=result.ok, remote_display=result.remote_display, detail=result.detail

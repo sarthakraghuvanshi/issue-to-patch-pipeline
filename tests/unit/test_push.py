@@ -12,7 +12,25 @@ from issue_to_patch.patching.push import (
     _redact_remote,
     parse_github_owner_repo,
     push_branch,
+    with_embedded_token,
 )
+
+
+def test_with_embedded_token_adds_userinfo_to_https() -> None:
+    assert (
+        with_embedded_token("https://github.com/alice/fork.git", "tok123")
+        == "https://tok123@github.com/alice/fork.git"
+    )
+
+
+def test_with_embedded_token_is_a_noop_for_scp_style_urls() -> None:
+    url = "git@github.com:alice/fork.git"
+    assert with_embedded_token(url, "tok123") == url
+
+
+def test_with_embedded_token_is_a_noop_when_a_credential_is_already_present() -> None:
+    url = "https://existing-user@github.com/alice/fork.git"
+    assert with_embedded_token(url, "tok123") == url
 
 
 def test_redact_remote_strips_userinfo_from_https() -> None:

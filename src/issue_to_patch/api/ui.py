@@ -193,6 +193,7 @@ def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerD
         if final_state is RunState.PATCH_VALIDATED:
             snapshot = state.get("repository")
             branch_dir = branch_target(run_id, snapshot)[0] if snapshot is not None else None
+            sections.append(_token_section())
             sections.append(_build_push_section(branch_dir))
             if branch_dir is not None and branch_dir.exists():
                 sections.append(_pull_request_section(state))
@@ -201,27 +202,56 @@ def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerD
     return _page(f"Run {run_id}", "\n".join(sections))
 
 
+def _token_section() -> str:
+    return """
+<section class="delivery-card" aria-labelledby="auth-heading">
+<div class="delivery-heading"><div>
+<p class="eyebrow">AUTHENTICATION</p><h2 id="auth-heading">GitHub personal access token</h2>
+<p>Used below to push your branch and to open the pull request — one token, both steps.</p>
+</div></div>
+<div class="delivery-body">
+<label for="github-token">GitHub personal access token</label>
+<input id="github-token" type="password" autocomplete="off"
+placeholder="Enter your GitHub token" aria-describedby="github-token-help">
+<small id="github-token-help">Needs 'repo' scope. No account on this server? This is all you
+need — leave blank only if you already have git credentials configured here yourself.
+Remembered in this browser only.</small>
+</div></section>
+"""
+
+
 def _build_push_section(branch_dir: Path | None) -> str:
     if branch_dir is not None and branch_dir.exists():
         return f"""
-<h2>Build &amp; push</h2>
-<p>Branch ready at <code>{html.escape(str(branch_dir))}</code>.</p>
-<label for="push-remote-url">Remote to push to (a fork you own — never the upstream repo)</label>
-<input id="push-remote-url" placeholder="git@github.com:you/your-fork.git">
-<small>Remembered in this browser only. Leave blank to use ITP_PUSH_REMOTE_URL on the
-server, if one is set.</small>
-<div style="margin-top:0.75rem">
-  <button id="push-btn" onclick="pushRun()">Push</button>
-</div>
-<p id="push-status" role="status" aria-live="polite"></p>
+<section class="delivery-card" aria-labelledby="push-heading">
+<div class="delivery-heading"><span class="step-number">01</span><div>
+<p class="eyebrow">PUBLISH YOUR CHANGES</p><h2 id="push-heading">Push to your fork</h2>
+<p>Send the reviewed branch to your GitHub repository.</p></div>
+<span class="badge success">Local branch ready</span></div>
+<div class="delivery-body">
+<label for="push-remote-url">Fork repository</label>
+<div class="publish-row"><input id="push-remote-url"
+aria-describedby="remote-help" placeholder="git@github.com:you/your-fork.git">
+<button id="push-btn" onclick="pushRun()">Push branch ↗</button></div>
+<small id="remote-help">Use a fork you own. This destination is remembered in your browser.
+Uses the GitHub token entered above, if any.</small>
+<details class="delivery-details"><summary>Local branch &amp; connection details</summary>
+<p>Your branch is ready to inspect or test at:</p>
+<code class="branch-location">{html.escape(str(branch_dir))}</code>
+<p>Leave the repository field blank to use the server's configured push destination.</p></details>
+<p id="push-status" class="delivery-status" role="status" aria-live="polite"></p>
+</div></section>
 """
     return """
-<h2>Build &amp; push</h2>
-<p>Apply this validated patch onto a real, persistent branch you can inspect, build, or test.</p>
-<div style="margin-top:0.75rem">
-  <button id="build-btn" onclick="buildRun()">Build branch</button>
-</div>
-<p id="build-status" role="status" aria-live="polite"></p>
+<section class="delivery-card" aria-labelledby="build-heading">
+<div class="delivery-heading"><span class="step-number">01</span><div>
+<p class="eyebrow">PREPARE YOUR CHANGES</p><h2 id="build-heading">Build a local branch</h2>
+<p>Apply the reviewed patch to a branch you can inspect and test.</p></div></div>
+<div class="delivery-body delivery-actions">
+<span>Next: push to your fork, then open a pull request.</span>
+<button id="build-btn" onclick="buildRun()">Build branch →</button>
+<p id="build-status" class="delivery-status" role="status" aria-live="polite"></p>
+</div></section>
 """
 
 
@@ -240,21 +270,25 @@ def _pull_request_section(state: InvestigationState) -> str:
     default_title = f"Fix: {summary or issue_ref or 'see description'}"
     default_body = f"Fixes {issue_ref}.\n\n{summary}".strip() if (issue_ref or summary) else ""
     return f"""
-<h2>Create a Pull Request</h2>
-<p>Opens a real PR on GitHub, from your fork's branch against the original repository.</p>
-<label for="pr-title">Title</label>
-<input id="pr-title" value="{html.escape(default_title)}">
-<label for="pr-body">Description</label>
-<textarea id="pr-body" rows="4">{html.escape(default_body)}</textarea>
-<label for="github-token">GitHub personal access token (needs 'repo' scope)</label>
-<input id="github-token" type="password"
-       placeholder="leave blank to use the server's ITP_GITHUB_TOKEN, if set">
-<small>Remembered in this browser only — a different credential from both the workspace
-API key above and the push-remote field; this one is yours on github.com.</small>
-<div style="margin-top:0.75rem">
-  <button id="create-pr-btn" onclick="createPullRequest()">Create Pull Request</button>
-</div>
-<p id="pr-status" role="status" aria-live="polite"></p>
+<section class="delivery-card" aria-labelledby="pr-heading">
+<div class="delivery-heading"><span class="step-number">02</span><div>
+<p class="eyebrow">READY FOR REVIEW</p><h2 id="pr-heading">Create a Pull Request</h2>
+<p>Propose your changes to the original repository after pushing your branch.</p></div></div>
+<div class="delivery-body">
+<div class="pr-context"><span>RELATED ISSUE</span>
+<strong>{html.escape(issue_ref or "This investigation")}</strong></div>
+<label for="pr-title">Pull request title</label>
+<input id="pr-title" value="{html.escape(default_title)}" placeholder="Describe the fix">
+<div class="editor-label"><label for="pr-body">Description</label>
+<span>Markdown supported</span></div>
+<textarea id="pr-body" rows="9" spellcheck="false"
+aria-describedby="pr-body-help">{html.escape(default_body)}</textarea>
+<small id="pr-body-help">Explain what changed and how you verified the fix.</small>
+<div class="delivery-footer"><p>Uses the GitHub token entered above. Creates a pull request on
+GitHub for others to review.</p>
+<button id="create-pr-btn" onclick="createPullRequest()">Create Pull Request ↗</button></div>
+<p id="pr-status" class="delivery-status" role="status" aria-live="polite"></p>
+</div></section>
 """
 
 

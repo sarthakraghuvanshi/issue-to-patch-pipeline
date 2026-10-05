@@ -309,6 +309,44 @@ async def test_push_with_a_remote_given_in_the_request_needs_no_server_config(
     assert f"itp/{run_id}" in ls_remote
 
 
+async def test_push_with_a_token_embeds_it_so_a_visitor_needs_no_server_side_credential(
+    client: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actual point of accepting a token here: a visitor with no git
+    credentials configured on this server (the common case for anyone other
+    than its operator) can still push, using nothing but their own token."""
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+
+    seen_remote: dict[str, str] = {}
+
+    def _fake_push_branch(branch_dir, branch_name, remote_url):  # type: ignore[no-untyped-def]
+        from issue_to_patch.patching.push import PushResult
+
+        seen_remote["url"] = remote_url
+        return PushResult(remote_display=remote_url, branch=branch_name, ok=True, detail="pushed")
+
+    monkeypatch.setattr("issue_to_patch.api.routes.push_branch", _fake_push_branch)
+
+    pushed = await async_client.post(
+        f"/runs/{run_id}/push",
+        json={"remote_url": "https://github.com/alice/fork.git", "token": "tok123"},
+    )
+    assert pushed.status_code == 200, pushed.text
+    assert seen_remote["url"] == "https://tok123@github.com/alice/fork.git"
+
+
 def _write_repository_json(
     artifacts_dir: Path, run_id: str, *, full_name: str, default_branch: str = "main"
 ) -> None:

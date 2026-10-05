@@ -163,11 +163,18 @@ async function pushRun() {
   var remoteUrl = remoteEl ? remoteEl.value.trim() : '';
   if (remoteUrl) localStorage.setItem('itp_push_remote_url', remoteUrl);
   else localStorage.removeItem('itp_push_remote_url');
+  // Same GitHub token as "Create a Pull Request" below — reused here so a
+  // visitor with no git credentials on this server can still push, using
+  // only their own token over https://. Harmless to send for an ssh/scp
+  // remote too: the server ignores it when the URL has no https:// scheme.
+  var tokenEl = document.getElementById('github-token');
+  var pushToken = tokenEl ? tokenEl.value.trim() : '';
   btn.disabled = true;
   status.textContent = 'Pushing…';
   try {
     var resp = await fetch('/runs/' + runId + '/push', {
-      method: 'POST', headers: apiKeyHeader(), body: JSON.stringify({ remote_url: remoteUrl || null })
+      method: 'POST', headers: apiKeyHeader(),
+      body: JSON.stringify({ remote_url: remoteUrl || null, token: pushToken || null })
     });
     var body = await resp.json().catch(function () { return null; });
     if (resp.ok && body && body.ok) {
