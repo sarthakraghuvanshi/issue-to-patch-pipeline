@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import respx
 
 from issue_to_patch.api import deps as api_deps
 from issue_to_patch.api.app import app
@@ -50,6 +51,12 @@ async def client(
     monkeypatch.setenv("ITP_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("ITP_DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'api.db'}")
     get_settings.cache_clear()
+    # ASGITransport test requests have no real client address, so rate_limit
+    # (api/deps.py) buckets every one of them under the same "unknown" key —
+    # a module-level dict shared across the whole pytest session. Without
+    # clearing it, enough tests in one run eventually trip the 60/minute
+    # default and a later, unrelated test starts failing with 429.
+    api_deps._rate_windows.clear()
 
     snap = create_snapshot(str(fixture_repo), tmp_path / "snap", repo_name="acme/calc")
     store = Store(get_settings().database_url)
@@ -70,6 +77,7 @@ async def client(
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()
+    api_deps._rate_windows.clear()
 
 
 async def test_openapi_schema_lists_every_endpoint(client: tuple) -> None:
@@ -79,11 +87,14 @@ async def test_openapi_schema_lists_every_endpoint(client: tuple) -> None:
     paths = response.json()["paths"]
     assert set(paths) == {
         "/runs",
+        "/runs/auto",
         "/runs/{run_id}",
         "/runs/{run_id}/approve",
         "/runs/{run_id}/retrieval",
         "/runs/{run_id}/patch",
         "/runs/{run_id}/audit",
+        "/runs/{run_id}/build",
+        "/runs/{run_id}/push",
         "/search",
         "/validate-patch",
     }
@@ -135,6 +146,164 @@ async def test_full_run_pauses_then_approves_to_patch_validated(client: tuple) -
     assert trail["decisions_chain_valid"] is True
     assert [d["reviewer"] for d in trail["decisions"]] == ["alice"]
     assert any(t["tool"] == "validate_patch" for t in trail["tool_calls"])
+
+
+async def test_build_after_approval_creates_a_persistent_branch(client: tuple) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+
+    built = await async_client.post(f"/runs/{run_id}/build")
+    assert built.status_code == 200, built.text
+    body = built.json()
+    assert body["branch_name"] == f"itp/{run_id}"
+    branch_dir = Path(body["branch_dir"])
+    assert branch_dir.exists()
+    assert "a + b" in (branch_dir / "calculator.py").read_text("utf-8")
+
+    # idempotent: calling it again reports the same branch, doesn't error
+    built_again = await async_client.post(f"/runs/{run_id}/build")
+    assert built_again.status_code == 200
+    assert built_again.json()["sha"] == body["sha"]
+
+
+async def test_build_before_patch_validated_is_a_conflict(client: tuple) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    response = await async_client.post(f"/runs/{run_id}/build")
+    assert response.status_code == 409
+
+
+async def test_push_before_build_is_a_conflict(client: tuple) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+
+    response = await async_client.post(f"/runs/{run_id}/push")
+    assert response.status_code == 409
+
+
+async def test_push_without_a_configured_remote_is_a_bad_request(client: tuple) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+
+    response = await async_client.post(f"/runs/{run_id}/push")
+    assert response.status_code == 400
+    assert "ITP_PUSH_REMOTE_URL" in response.text
+
+
+async def test_push_to_a_configured_local_bare_remote_succeeds(
+    client: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True)
+    monkeypatch.setenv("ITP_PUSH_REMOTE_URL", f"file://{bare}")
+    get_settings.cache_clear()
+
+    pushed = await async_client.post(f"/runs/{run_id}/push")
+    assert pushed.status_code == 200, pushed.text
+    body = pushed.json()
+    assert body["ok"] is True
+
+    ls_remote = subprocess.run(
+        ["git", "ls-remote", str(bare), f"itp/{run_id}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert f"itp/{run_id}" in ls_remote
+
+
+async def test_push_with_a_remote_given_in_the_request_needs_no_server_config(
+    client: tuple, tmp_path: Path
+) -> None:
+    """The UI lets a user type a remote directly (remembered in their own
+    browser) instead of requiring ITP_PUSH_REMOTE_URL on the server at all."""
+    import subprocess
+
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True)
+
+    # Deliberately NOT setting ITP_PUSH_REMOTE_URL anywhere for this test.
+    pushed = await async_client.post(f"/runs/{run_id}/push", json={"remote_url": f"file://{bare}"})
+    assert pushed.status_code == 200, pushed.text
+    assert pushed.json()["ok"] is True
+
+    ls_remote = subprocess.run(
+        ["git", "ls-remote", str(bare), f"itp/{run_id}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert f"itp/{run_id}" in ls_remote
 
 
 async def test_audit_endpoint_404s_for_an_unknown_run(client: tuple) -> None:
@@ -244,6 +413,78 @@ async def test_a_paused_run_survives_a_simulated_process_restart(client: tuple) 
     assert approved.status_code == 200
     assert approved.json()["status"] == "PATCH_VALIDATED"
     assert store.get_run_state(run_id) == "PATCH_VALIDATED"
+
+
+_AUTO_BASE = "https://api.github.com"
+_AUTO_REPO = "acme/widget"
+
+
+def _mock_github_for_auto() -> None:
+    respx.get(f"{_AUTO_BASE}/repos/{_AUTO_REPO}/issues/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 7,
+                "title": "add() is wrong",
+                "body": "add() returns the wrong result",
+                "state": "open",
+                "labels": [],
+                "user": {"login": "reporter"},
+                "comments": 0,
+                "html_url": f"https://github.com/{_AUTO_REPO}/issues/7",
+            },
+        )
+    )
+    respx.get(f"{_AUTO_BASE}/repos/{_AUTO_REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get(f"{_AUTO_BASE}/repos/{_AUTO_REPO}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "full_name": _AUTO_REPO,
+                "default_branch": "main",
+                "visibility": "public",
+                "language": "Python",
+                "topics": [],
+                "size": 1,
+                "clone_url": f"https://github.com/{_AUTO_REPO}.git",
+            },
+        )
+    )
+    respx.get(f"{_AUTO_BASE}/repos/{_AUTO_REPO}/issues/7/timeline").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+
+@respx.mock
+async def test_auto_run_ingests_indexes_and_investigates_from_a_bare_url(
+    client: tuple, fixture_repo: Path
+) -> None:
+    async_client, _snap_dir, llm, store = client
+    _mock_github_for_auto()
+    _queue_happy_path(llm)
+
+    response = await async_client.post(
+        "/runs/auto",
+        json={
+            "issue_url": f"https://github.com/{_AUTO_REPO}/issues/7",
+            "repo_source": str(fixture_repo),
+            "scope": ["calculator.py"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "AWAITING_HUMAN_REVIEW"
+    assert body["hypothesis"]["summary"] == "subtracts instead of adds"
+    assert store.get_run_state(body["run_id"]) is not None
+
+
+@respx.mock
+async def test_auto_run_with_a_bad_issue_reference_is_a_bad_request(client: tuple) -> None:
+    async_client, _snap_dir, _llm, _store = client
+    response = await async_client.post("/runs/auto", json={"issue_url": "not a real reference"})
+    assert response.status_code == 400
 
 
 async def test_start_run_with_an_unindexed_snapshot_is_a_bad_request(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
@@ -18,6 +18,9 @@ from issue_to_patch import __version__
 from issue_to_patch.config import get_settings
 from issue_to_patch.logging import configure_logging
 from issue_to_patch.run_states import RunState
+
+if TYPE_CHECKING:
+    from issue_to_patch.graph import InvestigationHandle
 
 app = typer.Typer(add_completion=False, help="Issue-to-Patch Automation Pipeline")
 
@@ -305,6 +308,46 @@ def build_eval_set(
         typer.echo(f"  {r.issue_id:<32} gold={r.gold_files}")
 
 
+def _print_investigation(handle: InvestigationHandle) -> RunState | None:
+    """Print run_id, issue, top hypothesis + cites, changed_files + full
+    diff, and validation checks. Returns the terminal RunState once the run
+    has finished, or None while it's paused awaiting human review. Shared by
+    `investigate` and `auto` so this view can't drift between the two."""
+    state = handle.state
+    typer.echo(f"run_id:        {handle.run_id}")
+    typer.echo(
+        f"view in browser: http://127.0.0.1:8000/ui/runs/{handle.run_id}  (needs `make serve`)"
+    )
+    if (parsed_issue := state.get("issue")) is not None:
+        typer.echo(f"issue:         {parsed_issue.reference}")
+    if hypotheses := state.get("hypotheses"):
+        top = hypotheses[0]
+        typer.echo(f"root cause:    {top.summary} (confidence={top.confidence:.2f})")
+        for loc in top.cites:
+            typer.echo(
+                f"  cites:       {loc.path}:{loc.line_start}-{loc.line_end} [{loc.chunk_id}]"
+            )
+    if (patch := state.get("candidate_patch")) is not None:
+        typer.echo(f"changed_files: {patch.changed_files}")
+        # A human can't approve/reject/revise a change they can't see.
+        typer.echo("--- diff ---")
+        typer.echo(patch.patch_text)
+        typer.echo("--- end diff ---")
+    if (validation := state.get("validation")) is not None:
+        for check in validation.checks:
+            typer.echo(f"  [{check.status.value:>4}] {check.name} {check.detail}".rstrip())
+    if handle.awaiting_human:
+        typer.echo("status:        AWAITING_HUMAN_REVIEW")
+        return None
+    final_state = state["final_state"]
+    assert final_state is not None  # PersistRun always sets it once the graph reaches END
+    typer.echo(f"state:         {final_state.value}")
+    if errors := state.get("errors"):
+        for error in errors:
+            typer.echo(f"  error:       {error}")
+    return final_state
+
+
 @app.command()
 def investigate(
     issue: Annotated[
@@ -389,29 +432,189 @@ def investigate(
             handle, HumanDecision(decision=decision, reason=reason, reviewer=reviewer, role=role)
         )
 
-    state = handle.state
-    typer.echo(f"run_id:        {handle.run_id}")
-    if (parsed_issue := state.get("issue")) is not None:
-        typer.echo(f"issue:         {parsed_issue.reference}")
-    if hypotheses := state.get("hypotheses"):
-        top = hypotheses[0]
-        typer.echo(f"root cause:    {top.summary} (confidence={top.confidence:.2f})")
-        for loc in top.cites:
-            typer.echo(
-                f"  cites:       {loc.path}:{loc.line_start}-{loc.line_end} [{loc.chunk_id}]"
-            )
-    if (patch := state.get("candidate_patch")) is not None:
-        typer.echo(f"changed_files: {patch.changed_files}")
-    if (validation := state.get("validation")) is not None:
-        for check in validation.checks:
-            typer.echo(f"  [{check.status.value:>4}] {check.name} {check.detail}".rstrip())
-    if handle.awaiting_human:
-        typer.echo("status:        AWAITING_HUMAN_REVIEW — rerun with --decision to resolve")
+    final_state = _print_investigation(handle)
+    if final_state is None:
+        typer.echo("rerun with --decision to resolve")
         raise typer.Exit(10)
-    final_state = state["final_state"]
-    assert final_state is not None  # PersistRun always sets it once the graph reaches END
-    typer.echo(f"state:         {final_state.value}")
     raise typer.Exit(_EXIT_CODES[final_state])
+
+
+@app.command()
+def auto(
+    issue_url: Annotated[
+        str | None, typer.Argument(help="GitHub issue URL or owner/repo#n; prompted if omitted")
+    ] = None,
+    token: Annotated[
+        str | None, typer.Option(help="GitHub token (else ITP_GITHUB_TOKEN, else anonymous)")
+    ] = None,
+    repo_source: Annotated[
+        str | None,
+        typer.Option(help="Override the clone source (local path or URL); default = clone_url"),
+    ] = None,
+    ref: Annotated[
+        str | None, typer.Option(help="Branch, tag, or SHA to pin; default = repo default branch")
+    ] = None,
+    scope: Annotated[
+        list[str] | None, typer.Option(help="Glob(s) the patch must stay within")
+    ] = None,
+    max_lines: Annotated[int, typer.Option(help="Max lines before a big class is split")] = 200,
+    reviewer: Annotated[str | None, typer.Option(help="Reviewer name; prompted if omitted")] = None,
+) -> None:
+    """One interactive session: ingest -> index -> investigate -> human
+    review -> optional build -> optional push -> optional pull request.
+
+    Calls the same functions ``ingest``/``index``/``investigate`` call
+    directly (never shells out to those commands), sharing one run_id across
+    every stage. The human-review gate is never skipped: build only runs
+    after an explicit approve, push is a *separate* confirmation after that,
+    and opening a pull request is a third, separate confirmation after
+    push — never implied by any of the others.
+    """
+    import asyncio
+    import uuid
+
+    from issue_to_patch.auto_run import auto_index, auto_ingest, auto_investigate
+    from issue_to_patch.graph import (
+        GraphDependencies,
+        HumanDecision,
+        build_dependencies,
+        resume_investigation,
+        sqlite_checkpointer,
+    )
+    from issue_to_patch.ingestion.errors import IngestionError
+    from issue_to_patch.logging import bind_run_id
+    from issue_to_patch.patching import materialize_branch, push_branch
+    from issue_to_patch.persistence import Store
+
+    if not issue_url:
+        issue_url = typer.prompt("Issue URL")
+
+    settings = get_settings()
+    run_id = uuid.uuid4().hex[:16]
+    run_dir = settings.artifacts_dir / run_id
+
+    with bind_run_id(run_id):
+        typer.echo(f"run_id:        {run_id}")
+        typer.echo("==> 1. fetching issue + repo...")
+        try:
+            ingest_result = asyncio.run(
+                auto_ingest(
+                    issue_url,
+                    run_dir,
+                    settings=settings,
+                    token=token,
+                    repo_source=repo_source,
+                    ref=ref,
+                )
+            )
+            typer.echo(f"    repo:      {ingest_result.repository.full_name}")
+            typer.echo(f"    commit:    {ingest_result.snapshot.commit_sha}")
+        except IngestionError as exc:
+            typer.echo(f"ingest failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+
+        typer.echo("==> 2. indexing repository...")
+        store = Store(settings.database_url)
+        store.create_all()
+        try:
+            snap, index_result = auto_index(run_dir, store, max_lines=max_lines)
+        except Exception as exc:
+            typer.echo(f"index failed: {type(exc).__name__}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"    chunks:    {index_result.chunks_written}")
+
+        typer.echo("==> 3. investigating...")
+        deps: GraphDependencies = build_dependencies(store=store, settings=settings)
+        checkpointer = sqlite_checkpointer(settings.artifacts_dir / "checkpoints.db")
+        try:
+            handle = auto_investigate(
+                issue_url, snap, deps, checkpointer, run_id=run_id, scope=scope
+            )
+        except Exception as exc:
+            typer.echo(f"investigation failed: {type(exc).__name__}: {exc}", err=True)
+            typer.echo("re-run with ITP_LOG_LEVEL=DEBUG for the full traceback", err=True)
+            raise typer.Exit(1) from exc
+
+        while True:
+            final_state = _print_investigation(handle)
+            if final_state is not None:
+                break
+            decision = typer.prompt("Decision [approve/reject/revise]")
+            if decision not in {"approve", "reject", "revise"}:
+                typer.echo("must be approve | reject | revise", err=True)
+                continue
+            reason = typer.prompt("Reason", default="")
+            reviewer_name = reviewer or typer.prompt("Reviewer name", default="human")
+            role = typer.prompt("Role [gatekeeper/auditor/strategist]", default="gatekeeper")
+            if role not in {"gatekeeper", "auditor", "strategist"}:
+                typer.echo("must be gatekeeper | auditor | strategist", err=True)
+                continue
+            try:
+                handle = resume_investigation(
+                    handle,
+                    HumanDecision(
+                        decision=decision, reason=reason, reviewer=reviewer_name, role=role
+                    ),
+                )
+            except Exception as exc:
+                typer.echo(f"resume failed: {type(exc).__name__}: {exc}", err=True)
+                raise typer.Exit(1) from exc
+
+        if final_state is not RunState.PATCH_VALIDATED:
+            raise typer.Exit(_EXIT_CODES[final_state])
+
+        if not typer.confirm(
+            "Build this patch onto a persistent branch you can inspect/build/test?",
+            default=True,
+        ):
+            raise typer.Exit(0)
+
+        patch = handle.state["candidate_patch"]
+        assert patch is not None  # PATCH_VALIDATED guarantees a candidate_patch
+        branch_name = f"itp/{run_id}"
+        # Must stay inside the snapshot dir (snap.root_path.parent) —
+        # materialize_branch's SafeGit is rooted there, and a sibling of it
+        # (e.g. plain run_dir/"branch") would be refused as an escape.
+        branch_dir = snap.root_path.parent / "branch"
+        try:
+            materialize_branch(snap, patch, branch_dir, branch_name)
+        except Exception as exc:
+            typer.echo(f"build failed: {type(exc).__name__}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"branch ready:  {branch_dir}  (git branch: {branch_name})")
+        typer.echo(f"  cd {branch_dir}  # then run your own build/tests")
+
+        if not typer.confirm("Push this branch to your configured remote now?", default=False):
+            raise typer.Exit(0)
+
+        if settings.push_remote_url is None:
+            typer.echo(
+                "ITP_PUSH_REMOTE_URL is not configured — set it to a remote you "
+                "own (e.g. your own fork) and re-run; nothing was pushed.",
+                err=True,
+            )
+            raise typer.Exit(0)
+        remote = settings.push_remote_url.get_secret_value()
+        # Cheap, best-effort nudge — no extra API calls: if the configured
+        # remote's string looks like it could be the same repo the issue
+        # came from, double-check before ever pushing there.
+        if (
+            snap.repo
+            and snap.repo.split("/")[-1] in remote
+            and not typer.confirm(
+                f"warning: this remote looks like it could be the same repo the "
+                f"issue came from ({snap.repo}) — are you sure this is a fork/remote you own?",
+                default=False,
+            )
+        ):
+            typer.echo("push cancelled", err=True)
+            raise typer.Exit(0)
+        result = push_branch(branch_dir, branch_name, remote)
+        if result.ok:
+            typer.echo(f"pushed {result.branch} to {result.remote_display}")
+        else:
+            typer.echo(f"push failed: {result.detail}", err=True)
+            raise typer.Exit(1)
 
 
 @app.command()

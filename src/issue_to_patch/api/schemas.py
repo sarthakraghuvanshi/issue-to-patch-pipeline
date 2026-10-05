@@ -40,6 +40,18 @@ class StartRunRequest(BaseModel):
     scope: list[str] | None = Field(default=None, description="Glob(s) the patch must stay within")
 
 
+class AutoRunRequest(BaseModel):
+    """Like StartRunRequest, but does the ingest+index itself from a bare
+    issue URL instead of requiring an already-prepared snapshot."""
+
+    issue_url: str = Field(description="GitHub issue URL or owner/repo#n")
+    token: str | None = Field(default=None, description="GitHub token; else anonymous")
+    repo_source: str | None = Field(default=None, description="Override the clone source")
+    ref: str | None = Field(default=None, description="Branch/tag/SHA to pin")
+    scope: list[str] | None = Field(default=None, description="Glob(s) the patch must stay within")
+    max_lines: int = Field(default=200, description="Max lines before a big class is split")
+
+
 class RunStateResponse(BaseModel):
     run_id: str
     issue_ref: str | None = None
@@ -77,6 +89,28 @@ class PatchResponse(BaseModel):
     commit_sha: str
     changed_files: list[str]
     patch_text: str
+
+
+class BuildResponse(BaseModel):
+    run_id: str
+    branch_name: str
+    branch_dir: str
+    sha: str = Field(description="HEAD commit sha of the new, persistent branch")
+
+
+class PushRequest(BaseModel):
+    remote_url: str | None = Field(
+        default=None,
+        description="Remote you own (e.g. your own fork). Overrides "
+        "ITP_PUSH_REMOTE_URL for this call if given.",
+    )
+
+
+class PushResponse(BaseModel):
+    run_id: str
+    ok: bool
+    remote_display: str = Field(description="The remote URL, with any credential redacted")
+    detail: str
 
 
 class SearchRequest(BaseModel):

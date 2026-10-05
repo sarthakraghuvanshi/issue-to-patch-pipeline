@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     api_key: SecretStr | None = None
     api_rate_limit_per_minute: int = Field(default=60, ge=1)
 
+    # --- push (auto command) --------------------------------------------
+    # A remote the user owns (e.g. their own fork) — never the repo the issue
+    # was filed against. SSH form (git@github.com:you/fork.git) is preferred:
+    # it never embeds a credential in the URL, so there's nothing to redact
+    # if it ever appears in subprocess argv or git's own error text. An
+    # https://<user>:<token>@... form also works but the token then sits in
+    # argv for the life of the push subprocess.
+    push_remote_url: SecretStr | None = None
+
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -141,6 +150,14 @@ class Settings(BaseSettings):
                 "for a real LLM provider"
             )
         return key.get_secret_value()
+
+    def require_push_remote_url(self) -> str:
+        if self.push_remote_url is None:
+            raise RuntimeError(
+                "ITP_PUSH_REMOTE_URL is required to push a branch — set it to a "
+                "remote you own (e.g. your own fork), never the upstream repository"
+            )
+        return self.push_remote_url.get_secret_value()
 
 
 @lru_cache

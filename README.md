@@ -36,6 +36,12 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
       Real cost tracking wired through (`Run.cost_usd` had existed since Sprint 1
       but nothing filled it in) and the graph now writes its patch/validation to
       disk like Sprint 1's deterministic pipeline always did.
+- [x] `auto` — one interactive command (ingest → index → investigate → review →
+      build → push) instead of four manual ones. On `PATCH_VALIDATED` it can
+      materialize the patch onto a real, persistent local branch (`git worktree`
+      + `git am` — no new edit-application logic), then — a separate confirmation,
+      never implied by approval — push that branch to a remote you own
+      (`ITP_PUSH_REMOTE_URL`; never the repo the issue came from, never upstream).
 
 ## Quickstart
 
@@ -120,6 +126,15 @@ uv run issue-to-patch investigate --issue "add() returns the wrong result" \
 make eval                                    # -> evals/report.{json,html}
 uv run issue-to-patch eval-suite --run-id <run_id> --run-id <run_id2> --judge
 uv run issue-to-patch judge <run_id>          # score one run on its own
+
+# One interactive command: ingest -> index -> investigate -> review -> build -> push.
+# Give it a URL; it does the mechanical steps itself and shows you the diagnosis + diff
+# right there, then prompts for your decision:
+uv run issue-to-patch auto https://github.com/OWNER/REPO/issues/123 --scope 'src/**'
+# On PATCH_VALIDATED it asks to build the fix onto a real, persistent local branch
+# (ready to inspect/build/test), then — a separate confirmation — asks to push that
+# branch to a remote YOU OWN (never the repo the issue came from):
+export ITP_PUSH_REMOTE_URL=git@github.com:you/your-fork.git   # optional; SSH form preferred
 ```
 
 > The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
@@ -175,3 +190,15 @@ graph and checkpointer don't change, only *who* calls `graph.invoke()`.
   `make eval` is real and runnable today; gating CI on it needs either `ITP_LLM_PROVIDER=fake`
   (numbers that don't mean anything for judge scores) or a real provider key held as a
   CI secret — a deliberate choice for whoever deploys this, not one to make silently here.
+
+## What `auto`'s push step deliberately leaves out
+
+- **Never pushes to the repository the issue came from, and never opens a GitHub Pull
+  Request.** The only push target that ever exists is `ITP_PUSH_REMOTE_URL`, which the
+  user sets themselves to a remote they own (e.g. their own fork). There is no fallback
+  remote derived from the snapshot, and no GitHub API call anywhere in the push path.
+- **Push is never implied by approve.** It's a second, separate confirmation (default
+  `No`), only offered after the build step has already succeeded.
+- A real `git push` to a real, network-reachable remote can't be exercised in CI — the
+  test suite proves the actual `SafeGit.run("push", ...)` call end-to-end against a
+  local bare repo (`file://`, a completely realistic networkless transport) instead.

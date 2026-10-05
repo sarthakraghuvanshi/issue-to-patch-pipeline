@@ -134,6 +134,107 @@
         "title": "AuditTrail",
         "type": "object"
       },
+      "AutoRunRequest": {
+        "description": "Like StartRunRequest, but does the ingest+index itself from a bare\nissue URL instead of requiring an already-prepared snapshot.",
+        "properties": {
+          "issue_url": {
+            "description": "GitHub issue URL or owner/repo#n",
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "max_lines": {
+            "default": 200,
+            "description": "Max lines before a big class is split",
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Branch/tag/SHA to pin",
+            "title": "Ref"
+          },
+          "repo_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Override the clone source",
+            "title": "Repo Source"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Glob(s) the patch must stay within",
+            "title": "Scope"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "GitHub token; else anonymous",
+            "title": "Token"
+          }
+        },
+        "required": [
+          "issue_url"
+        ],
+        "title": "AutoRunRequest",
+        "type": "object"
+      },
+      "BuildResponse": {
+        "properties": {
+          "branch_dir": {
+            "title": "Branch Dir",
+            "type": "string"
+          },
+          "branch_name": {
+            "title": "Branch Name",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "sha": {
+            "description": "HEAD commit sha of the new, persistent branch",
+            "title": "Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "branch_name",
+          "branch_dir",
+          "sha"
+        ],
+        "title": "BuildResponse",
+        "type": "object"
+      },
       "CheckStatus": {
         "enum": [
           "pass",
@@ -259,6 +360,53 @@
           "patch_text"
         ],
         "title": "PatchResponse",
+        "type": "object"
+      },
+      "PushRequest": {
+        "properties": {
+          "remote_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Remote you own (e.g. your own fork). Overrides ITP_PUSH_REMOTE_URL for this call if given.",
+            "title": "Remote Url"
+          }
+        },
+        "title": "PushRequest",
+        "type": "object"
+      },
+      "PushResponse": {
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "remote_display": {
+            "description": "The remote URL, with any credential redacted",
+            "title": "Remote Display",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "ok",
+          "remote_display",
+          "detail"
+        ],
+        "title": "PushResponse",
         "type": "object"
       },
       "RetrievalHitOut": {
@@ -800,6 +948,66 @@
         ]
       }
     },
+    "/runs/auto": {
+      "post": {
+        "description": "Like ``POST /runs``, but does the ingest+index itself from a bare\nissue URL \u2014 the same ``auto_ingest``/``auto_index``/``auto_investigate``\nthe `auto` CLI command calls, so the two can never drift.",
+        "operationId": "start_auto_run_runs_auto_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Auto Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
     "/runs/{run_id}": {
       "get": {
         "operationId": "get_run_runs__run_id__get",
@@ -985,6 +1193,65 @@
         ]
       }
     },
+    "/runs/{run_id}/build": {
+      "post": {
+        "description": "Materialize the validated patch onto a real, persistent branch \u2014\nidempotent: a second call after the branch already exists just reports\nits current HEAD instead of erroring.",
+        "operationId": "build_run_runs__run_id__build_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Build Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
     "/runs/{run_id}/patch": {
       "get": {
         "operationId": "get_patch_runs__run_id__patch_get",
@@ -1038,6 +1305,81 @@
           }
         },
         "summary": "Get Patch",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/runs/{run_id}/push": {
+      "post": {
+        "operationId": "push_run_runs__run_id__push_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PushRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Push Run",
         "tags": [
           "runs"
         ]

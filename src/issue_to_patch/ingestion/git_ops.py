@@ -14,6 +14,7 @@ Repository content is untrusted (Principle 3), so we never pass it to a shell â€
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -46,11 +47,28 @@ _ALLOWED_SUBCOMMANDS = frozenset(
         "apply",
         "format-patch",
         "am",
+        "push",
     }
 )
 
-# Subcommands that touch the network; blocked after go_offline().
+# Subcommands that touch the network; blocked after go_offline(). "remote" is
+# deliberately never allowlisted above â€” a push target is always passed as a
+# literal URL straight to `git push <url> <refspec>`, so `git remote add` is
+# never needed and the allowlist doesn't have to grow to support it.
 _NETWORK_SUBCOMMANDS = frozenset({"clone", "fetch", "pull", "push", "remote"})
+
+# `push` is the one subcommand that needs real network/auth plumbing (SSH
+# agent, known_hosts, PATH to find `ssh`) rather than the fully-pinned,
+# byte-stable env every other subcommand runs under. Narrow and explicit:
+# only these variables pass through, only for `push`.
+_PUSH_ENV_PASSTHROUGH = (
+    "SSH_AUTH_SOCK",
+    "HOME",
+    "PATH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "SSH_ASKPASS",
+)
 
 # A fixed identity + timestamp so commits (and therefore patches) are byte-stable.
 _DETERMINISTIC_ENV = {
@@ -117,13 +135,17 @@ class SafeGit:
         workdir = self._safe_cwd(cwd)
         self._check_path_args(args, allow_external_paths=allow_external_paths)
 
+        env = {**_DETERMINISTIC_ENV}
+        if subcommand == "push":
+            env.update({k: v for k, v in os.environ.items() if k in _PUSH_ENV_PASSTHROUGH})
+
         completed = subprocess.run(
             ["git", *args],
             cwd=workdir,
             capture_output=True,
             text=True,
             input=input_text,
-            env={**_DETERMINISTIC_ENV},
+            env=env,
             check=False,
         )
         invocation = GitInvocation(

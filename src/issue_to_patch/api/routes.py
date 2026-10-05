@@ -8,6 +8,7 @@ services stay independently testable and CLI-usable.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,14 +17,19 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from issue_to_patch.api.deps import (
     CheckpointerDep,
     GraphDepsDep,
+    SettingsDep,
     StoreDep,
     rate_limit,
     require_auth,
 )
 from issue_to_patch.api.schemas import (
     ApproveRequest,
+    AutoRunRequest,
+    BuildResponse,
     HypothesisOut,
     PatchResponse,
+    PushRequest,
+    PushResponse,
     RetrievalHitOut,
     RetrievalResponse,
     RunStateResponse,
@@ -36,6 +42,7 @@ from issue_to_patch.api.schemas import (
     ValidatePatchResponse,
     ValidationCheckOut,
 )
+from issue_to_patch.auto_run import auto_index, auto_ingest, auto_investigate
 from issue_to_patch.graph import (
     HumanDecision,
     UnknownRun,
@@ -45,13 +52,16 @@ from issue_to_patch.graph import (
 )
 from issue_to_patch.graph.deps import GraphDependencies
 from issue_to_patch.graph.run import InvestigationHandle
-from issue_to_patch.ingestion.errors import RepositoryNotFound
+from issue_to_patch.ingestion.errors import IngestionError, RepositoryNotFound
+from issue_to_patch.ingestion.git_ops import SafeGit
 from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.ingestion.snapshot import load_snapshot
+from issue_to_patch.patching import EditApplicationError, materialize_branch, push_branch
 from issue_to_patch.patching.models import PatchArtifact, ValidationReport
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
 from issue_to_patch.retrieval import RetrievalService, SearchFilters
+from issue_to_patch.run_states import RunState
 
 _AUTHED = [Depends(require_auth), Depends(rate_limit)]
 
@@ -131,6 +141,39 @@ def start_run(
     return _to_response(handle)
 
 
+@runs_router.post("/auto", response_model=RunStateResponse, status_code=201)
+async def start_auto_run(
+    body: AutoRunRequest, deps: GraphDepsDep, checkpointer: CheckpointerDep, settings: SettingsDep
+) -> RunStateResponse:
+    """Like ``POST /runs``, but does the ingest+index itself from a bare
+    issue URL — the same ``auto_ingest``/``auto_index``/``auto_investigate``
+    the `auto` CLI command calls, so the two can never drift."""
+    run_id = uuid.uuid4().hex[:16]
+    run_dir = settings.artifacts_dir / run_id
+    try:
+        await auto_ingest(
+            body.issue_url,
+            run_dir,
+            settings=settings,
+            token=body.token,
+            repo_source=body.repo_source,
+            ref=body.ref,
+        )
+    except IngestionError as exc:
+        raise HTTPException(400, f"ingest failed: {exc}") from exc
+    try:
+        snapshot, _ = auto_index(run_dir, deps.store, max_lines=body.max_lines)
+    except Exception as exc:
+        raise HTTPException(400, f"index failed: {exc}") from exc
+    try:
+        handle = auto_investigate(
+            body.issue_url, snapshot, deps, checkpointer, run_id=run_id, scope=body.scope
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"investigation failed: {exc}") from exc
+    return _to_response(handle)
+
+
 @runs_router.get("/{run_id}", response_model=RunStateResponse)
 def get_run(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) -> RunStateResponse:
     return _to_response(_load_or_404(run_id, deps, checkpointer))
@@ -186,6 +229,69 @@ def get_patch(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) ->
         commit_sha=patch.commit_sha,
         changed_files=patch.changed_files,
         patch_text=patch.patch_text,
+    )
+
+
+def _branch_target(run_id: str, snapshot: RepositorySnapshot) -> tuple[Path, str]:
+    """Same convention the `auto` CLI command uses — a run started via the
+    API or the CLI ends up buildable/pushable the same way."""
+    return snapshot.root_path.parent / "branch", f"itp/{run_id}"
+
+
+@runs_router.post("/{run_id}/build", response_model=BuildResponse)
+def build_run(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) -> BuildResponse:
+    """Materialize the validated patch onto a real, persistent branch —
+    idempotent: a second call after the branch already exists just reports
+    its current HEAD instead of erroring."""
+    handle = _load_or_404(run_id, deps, checkpointer)
+    if handle.state.get("final_state") is not RunState.PATCH_VALIDATED:
+        raise HTTPException(409, "run must be PATCH_VALIDATED to build")
+    snapshot = handle.state["repository"]
+    patch = handle.state["candidate_patch"]
+    assert snapshot is not None and patch is not None  # PATCH_VALIDATED guarantees both
+    branch_dir, branch_name = _branch_target(run_id, snapshot)
+    if branch_dir.exists():
+        sha = SafeGit(root=branch_dir).run("rev-parse", "HEAD", cwd=branch_dir).stdout.strip()
+    else:
+        try:
+            sha = materialize_branch(snapshot, patch, branch_dir, branch_name)
+        except EditApplicationError as exc:
+            raise HTTPException(500, f"build failed: {exc}") from exc
+    return BuildResponse(
+        run_id=run_id, branch_name=branch_name, branch_dir=str(branch_dir), sha=sha
+    )
+
+
+@runs_router.post("/{run_id}/push", response_model=PushResponse)
+def push_run(
+    run_id: str,
+    deps: GraphDepsDep,
+    checkpointer: CheckpointerDep,
+    settings: SettingsDep,
+    body: PushRequest | None = None,
+) -> PushResponse:
+    handle = _load_or_404(run_id, deps, checkpointer)
+    snapshot = handle.state.get("repository")
+    if snapshot is None:
+        raise HTTPException(404, f"no such run: {run_id}")
+    branch_dir, branch_name = _branch_target(run_id, snapshot)
+    if not branch_dir.exists():
+        raise HTTPException(409, "build the branch before pushing")
+    # A remote given in the request (e.g. typed into the UI, remembered in
+    # that browser) wins for this one call; ITP_PUSH_REMOTE_URL is only the
+    # server-wide fallback default, never required.
+    remote_url = (body.remote_url if body else None) or (
+        settings.push_remote_url.get_secret_value() if settings.push_remote_url else None
+    )
+    if remote_url is None:
+        raise HTTPException(
+            400,
+            "No push remote given — pass remote_url, or set ITP_PUSH_REMOTE_URL on the "
+            "server, to a remote you own (e.g. your own fork), never the upstream repository",
+        )
+    result = push_branch(branch_dir, branch_name, remote_url)
+    return PushResponse(
+        run_id=run_id, ok=result.ok, remote_display=result.remote_display, detail=result.detail
     )
 
 

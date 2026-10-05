@@ -81,6 +81,44 @@ def generate_patch(snapshot: RepositorySnapshot, plan: EditPlan) -> PatchArtifac
         shutil.rmtree(work_parent, ignore_errors=True)
 
 
+def materialize_branch(
+    snapshot: RepositorySnapshot, patch: PatchArtifact, dest_dir: Path, branch_name: str
+) -> str:
+    """Apply an already-validated patch onto a NEW, PERSISTENT worktree at
+    ``dest_dir``, checked out on ``branch_name``.
+
+    Unlike :func:`generate_patch`'s throwaway worktree, this one is never
+    removed here — the caller is choosing to keep it so a human can ``cd``
+    in, build, and test. ``patch.patch_text`` is already an ``am``-compatible
+    mbox patch (produced by ``generate_patch``'s ``git format-patch``), so
+    this needs no edit-application logic of its own — it just replays the
+    same, already-validated patch. Returns the new HEAD sha.
+    """
+    if dest_dir.exists():
+        raise EditApplicationError(f"branch directory already exists: {dest_dir}")
+    repo = snapshot.root_path
+    git = SafeGit(root=repo.parent if repo.parent.exists() else repo)
+    try:
+        git.run(
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            branch_name,
+            str(dest_dir),
+            snapshot.commit_sha,
+            cwd=repo,
+        )
+        git.run("am", "--quiet", cwd=dest_dir, input_text=patch.patch_text)
+    except UnsafeGitInvocation:
+        with contextlib.suppress(UnsafeGitInvocation):
+            git.run("worktree", "remove", "--force", str(dest_dir), cwd=repo, check=False)
+        with contextlib.suppress(UnsafeGitInvocation):
+            git.run("branch", "-D", branch_name, cwd=repo, check=False)
+        raise
+    return git.run("rev-parse", "HEAD", cwd=dest_dir).stdout.strip()
+
+
 def _apply_one(worktree: Path, edit: FileEdit) -> None:
     if ".." in Path(edit.path).parts or Path(edit.path).is_absolute():
         raise EditApplicationError(f"unsafe edit path: {edit.path}")

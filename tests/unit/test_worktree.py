@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from issue_to_patch.ingestion.snapshot import create_snapshot
-from issue_to_patch.patching import EditPlan, FileEdit, generate_patch
+from issue_to_patch.patching import EditPlan, FileEdit, generate_patch, materialize_branch
 from issue_to_patch.patching.worktree import EditApplicationError
 
 
@@ -43,3 +43,40 @@ def test_patch_is_byte_stable(fixture_repo: Path, tmp_path: Path) -> None:
     p1 = generate_patch(_snapshot(fixture_repo, tmp_path / "1"), plan)
     p2 = generate_patch(_snapshot(fixture_repo, tmp_path / "2"), plan)
     assert p1.patch_text == p2.patch_text
+
+
+def test_materialize_branch_applies_patch_and_persists(fixture_repo: Path, tmp_path: Path) -> None:
+    snap = _snapshot(fixture_repo, tmp_path)
+    plan = EditPlan(edits=[FileEdit(path="calculator.py", old="a - b", new="a + b")])
+    patch = generate_patch(snap, plan)
+
+    dest_dir = tmp_path / "snap" / "branch"
+    sha = materialize_branch(snap, patch, dest_dir, "itp/test-run")
+
+    assert sha  # a real commit, not an empty string
+    assert "a + b" in (dest_dir / "calculator.py").read_text("utf-8")
+    import subprocess
+
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=dest_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert branch == "itp/test-run"
+    # unlike generate_patch's throwaway worktree, this one must survive.
+    assert dest_dir.exists()
+
+
+def test_materialize_branch_rejects_an_existing_dest_dir(
+    fixture_repo: Path, tmp_path: Path
+) -> None:
+    snap = _snapshot(fixture_repo, tmp_path)
+    plan = EditPlan(edits=[FileEdit(path="calculator.py", old="a - b", new="a + b")])
+    patch = generate_patch(snap, plan)
+
+    dest_dir = tmp_path / "snap" / "branch"
+    dest_dir.mkdir()
+    with pytest.raises(EditApplicationError, match="already exists"):
+        materialize_branch(snap, patch, dest_dir, "itp/test-run")

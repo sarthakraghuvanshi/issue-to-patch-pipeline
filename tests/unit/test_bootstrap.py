@@ -31,6 +31,14 @@ def test_settings_require_helpers_fail_loudly(settings: Settings) -> None:
         settings.require_github_token()
     with pytest.raises(RuntimeError):
         settings.require_llm_api_key()
+    with pytest.raises(RuntimeError, match="ITP_PUSH_REMOTE_URL"):
+        settings.require_push_remote_url()
+
+
+def test_push_remote_url_round_trips(settings: Settings) -> None:
+    assert settings.push_remote_url is None
+    configured = Settings(_env_file=None, push_remote_url="git@github.com:me/fork.git")  # type: ignore[call-arg]
+    assert configured.require_push_remote_url() == "git@github.com:me/fork.git"
 
 
 @pytest.mark.parametrize(
