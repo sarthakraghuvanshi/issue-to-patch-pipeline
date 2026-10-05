@@ -61,6 +61,23 @@ def test_get_run_returns_the_full_row(tmp_path: Path) -> None:
     assert store.get_run("no-such-run") is None
 
 
+def test_list_runs_returns_most_recent_first(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.create_run(run_id="r1", issue_ref="x", repo=None, commit_sha=None, content_hash="h1")
+    store.create_run(run_id="r2", issue_ref="y", repo=None, commit_sha=None, content_hash="h2")
+    runs = store.list_runs()
+    assert [r.run_id for r in runs] == ["r2", "r1"]
+
+
+def test_list_runs_respects_limit(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    for i in range(3):
+        store.create_run(
+            run_id=f"r{i}", issue_ref="x", repo=None, commit_sha=None, content_hash=f"h{i}"
+        )
+    assert len(store.list_runs(limit=2)) == 2
+
+
 def test_human_decision_chain_is_valid_after_normal_writes(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.create_run(run_id="r1", issue_ref="x", repo=None, commit_sha=None, content_hash="h")

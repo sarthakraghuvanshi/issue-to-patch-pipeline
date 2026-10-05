@@ -256,6 +256,14 @@ class Store:
                 session.expunge(run)
             return run
 
+    def list_runs(self, *, limit: int = 50) -> list[Run]:
+        """Most recent runs first, for the UI's run list."""
+        with self.session() as session:
+            rows = list(session.scalars(select(Run).order_by(Run.created_at.desc()).limit(limit)))
+            for row in rows:
+                session.expunge(row)
+            return rows
+
     # -- chunks ---------------------------------------------------
     def replace_chunks(
         self, repository: str, commit_sha: str, rows: list[dict[str, object]]

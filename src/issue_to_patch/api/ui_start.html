@@ -1,0 +1,22 @@
+
+<section class="panel new-investigation">
+<div class="investigation-main"><div class="section-heading"><div><span class="eyebrow">LET&#39;S FIX SOMETHING</span>
+<h2>Start a new investigation</h2><p>Paste an issue. Get a diagnosis and a proposed patch.</p></div></div>
+<form id="investigation-form" onsubmit="event.preventDefault(); startAuto()">
+<label for="new-issue-url">GitHub issue URL</label>
+<div class="input-action"><input id="new-issue-url" type="url" required
+pattern="https://github.com/[^/]+/[^/]+/issues/[0-9]+/?" placeholder="https://github.com/owner/repo/issues/123"
+title="Enter a GitHub issue URL, for example https://github.com/owner/repo/issues/123">
+<button id="start-auto-btn" type="submit">Start investigation →</button></div>
+<details><summary>Advanced settings <span>Scope &amp; access key</span></summary><div class="advanced-fields">
+<div><label for="new-scope">File scope <span class="optional">optional</span></label>
+<input id="new-scope" placeholder="src/**, tests/**"><small>Comma-separated file patterns to focus the investigation.</small></div>
+<div><label for="api-key">Workspace API key <span class="optional">optional</span></label>
+<input id="api-key" type="password" autocomplete="off" placeholder="Enter your access key">
+<small>Required only for protected servers. Remembered in this browser.</small></div></div></details>
+<p id="new-run-status" class="feedback" role="status" aria-live="polite"></p>
+</form></div>
+<aside class="workflow"><span class="eyebrow">FROM ISSUE TO PATCH</span>
+<ol><li><span>01</span><div><b>Investigate</b><small>Understand the issue and relevant code.</small></div></li>
+<li><span>02</span><div><b>Generate &amp; validate</b><small>Build a patch and check the changes.</small></div></li>
+<li><span>03</span><div><b>Review &amp; decide</b><small>You approve the next step.</small></div></li></ol></aside></section>

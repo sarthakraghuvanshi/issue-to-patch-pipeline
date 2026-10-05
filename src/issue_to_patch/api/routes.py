@@ -12,8 +12,11 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from issue_to_patch.api._common import branch_target as _branch_target
+from issue_to_patch.api._common import checks_out as _checks_out
+from issue_to_patch.api._common import load_or_404 as _load_or_404
+from issue_to_patch.api._common import to_response as _to_response
 from issue_to_patch.api.deps import (
     CheckpointerDep,
     GraphDepsDep,
@@ -26,7 +29,6 @@ from issue_to_patch.api.schemas import (
     ApproveRequest,
     AutoRunRequest,
     BuildResponse,
-    HypothesisOut,
     PatchResponse,
     PushRequest,
     PushResponse,
@@ -40,24 +42,15 @@ from issue_to_patch.api.schemas import (
     StartRunRequest,
     ValidatePatchRequest,
     ValidatePatchResponse,
-    ValidationCheckOut,
 )
 from issue_to_patch.auto_run import auto_index, auto_ingest, auto_investigate
-from issue_to_patch.graph import (
-    HumanDecision,
-    UnknownRun,
-    load_investigation,
-    resume_investigation,
-    start_investigation,
-)
-from issue_to_patch.graph.deps import GraphDependencies
-from issue_to_patch.graph.run import InvestigationHandle
+from issue_to_patch.graph import HumanDecision, resume_investigation, start_investigation
 from issue_to_patch.ingestion.errors import IngestionError, RepositoryNotFound
 from issue_to_patch.ingestion.git_ops import SafeGit
 from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.ingestion.snapshot import load_snapshot
 from issue_to_patch.patching import EditApplicationError, materialize_branch, push_branch
-from issue_to_patch.patching.models import PatchArtifact, ValidationReport
+from issue_to_patch.patching.models import PatchArtifact
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
 from issue_to_patch.retrieval import RetrievalService, SearchFilters
@@ -77,51 +70,6 @@ def _load_snapshot_or_400(path: str) -> RepositorySnapshot:
         return load_snapshot(Path(path))
     except RepositoryNotFound as exc:
         raise HTTPException(400, f"could not load snapshot at {path!r}: {exc}") from exc
-
-
-def _load_or_404(
-    run_id: str, deps: GraphDependencies, checkpointer: BaseCheckpointSaver[str]
-) -> InvestigationHandle:
-    try:
-        return load_investigation(run_id, deps, checkpointer=checkpointer)
-    except UnknownRun as exc:
-        raise HTTPException(404, f"no such run: {run_id}") from exc
-
-
-def _checks_out(report: ValidationReport | None) -> list[ValidationCheckOut]:
-    if report is None:
-        return []
-    return [
-        ValidationCheckOut(name=c.name, status=c.status, detail=c.detail) for c in report.checks
-    ]
-
-
-def _to_response(handle: InvestigationHandle) -> RunStateResponse:
-    state = handle.state
-    issue = state.get("issue")
-    hypothesis = None
-    if hypotheses := state.get("hypotheses"):
-        top = hypotheses[0]
-        hypothesis = HypothesisOut(
-            summary=top.summary,
-            confidence=top.confidence,
-            cites=[SourceLocationOut(**loc.model_dump()) for loc in top.cites],
-        )
-    patch = state.get("candidate_patch")
-    final_state = state.get("final_state")
-    status = (
-        "AWAITING_HUMAN_REVIEW"
-        if handle.awaiting_human
-        else (final_state.value if final_state is not None else "IN_PROGRESS")
-    )
-    return RunStateResponse(
-        run_id=handle.run_id,
-        issue_ref=issue.reference if issue is not None else None,
-        status=status,
-        hypothesis=hypothesis,
-        changed_files=patch.changed_files if patch is not None else [],
-        validation=_checks_out(state.get("validation")),
-    )
 
 
 @runs_router.post("", response_model=RunStateResponse, status_code=201)
@@ -230,12 +178,6 @@ def get_patch(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) ->
         changed_files=patch.changed_files,
         patch_text=patch.patch_text,
     )
-
-
-def _branch_target(run_id: str, snapshot: RepositorySnapshot) -> tuple[Path, str]:
-    """Same convention the `auto` CLI command uses — a run started via the
-    API or the CLI ends up buildable/pushable the same way."""
-    return snapshot.root_path.parent / "branch", f"itp/{run_id}"
 
 
 @runs_router.post("/{run_id}/build", response_model=BuildResponse)
