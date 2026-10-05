@@ -10,7 +10,9 @@ from issue_to_patch.llm.client import AnthropicLLM, FakeLLM, OpenAILLM, get_llm
 
 
 def _settings(**overrides: object) -> Settings:
-    return Settings(**overrides)  # type: ignore[arg-type]
+    # _env_file=None: these tests assert exact key-presence/absence behavior,
+    # so they must never pick up a developer's real local .env file.
+    return Settings(_env_file=None, **overrides)  # type: ignore[arg-type,call-arg]
 
 
 def test_fake_provider_needs_no_key() -> None:

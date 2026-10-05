@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # --- models --------------------------------------------------------
     llm_provider: LLMProvider = LLMProvider.FAKE
     llm_api_key: SecretStr | None = None
+    # Provider-specific keys: set both once, then switch providers by
+    # changing only llm_provider — no need to re-paste a key each time.
+    # llm_api_key (above) still works and wins if both are set for the
+    # active provider (back-compat with existing single-key setups).
+    anthropic_api_key: SecretStr | None = None
+    openai_api_key: SecretStr | None = None
     llm_model: str = "claude-sonnet-5"
     embedding_model: str = "text-embedding-3-small"
 
@@ -123,9 +129,18 @@ class Settings(BaseSettings):
     def require_llm_api_key(self) -> str:
         if self.llm_provider is LLMProvider.FAKE:
             raise RuntimeError("the fake LLM provider has no API key")
-        if self.llm_api_key is None:
-            raise RuntimeError("ITP_LLM_API_KEY is required for a real LLM provider")
-        return self.llm_api_key.get_secret_value()
+        per_provider = {
+            LLMProvider.ANTHROPIC: self.anthropic_api_key,
+            LLMProvider.OPENAI: self.openai_api_key,
+        }.get(self.llm_provider)
+        key = self.llm_api_key or per_provider
+        if key is None:
+            raise RuntimeError(
+                "ITP_LLM_API_KEY (or the provider-specific "
+                f"ITP_{self.llm_provider.value.upper()}_API_KEY) is required "
+                "for a real LLM provider"
+            )
+        return key.get_secret_value()
 
 
 @lru_cache

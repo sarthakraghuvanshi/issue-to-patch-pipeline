@@ -113,7 +113,7 @@ def _analysis():
 
 
 # -- Patch Author --------------------------------------------------------------
-def test_patch_author_only_shows_the_llm_cited_evidence(tmp_path: Path) -> None:
+def test_patch_author_retains_supporting_evidence(tmp_path: Path) -> None:
     llm = FakeLLM()
     llm.queue_structured(
         {"message": "fix", "edits": [{"path": "src/calculator.py", "old": "a - b", "new": "a + b"}]}
@@ -128,7 +128,7 @@ def test_patch_author_only_shows_the_llm_cited_evidence(tmp_path: Path) -> None:
     assert isinstance(edit_plan, EditPlan)
     sent = llm.calls[0][-1].content
     assert "return a - b" in sent
-    assert "README.md" not in sent
+    assert "README.md" in sent
 
 
 def test_patch_author_handles_no_hypothesis(tmp_path: Path) -> None:
@@ -169,6 +169,8 @@ def test_patch_reviewer_returns_the_llms_verdict(tmp_path: Path) -> None:
     llm.queue_structured({"approved": False, "concerns": ["touches unrelated file"]})
     edit_plan = EditPlan(message="fix", edits=[{"path": "x.py", "old": "a", "new": "b"}])
     review = patch_reviewer(_issue(), edit_plan, TestPlan(), ["x.py"], _deps(tmp_path, llm))
+    assert '"old":"a"' in llm.calls[0][-1].content
+    assert '"new":"b"' in llm.calls[0][-1].content
     assert review.approved is False
     assert review.concerns == ["touches unrelated file"]
 

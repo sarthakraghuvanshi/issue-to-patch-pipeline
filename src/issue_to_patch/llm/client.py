@@ -181,7 +181,9 @@ class AnthropicLLM:
             self._record_usage(response.usage.input_tokens, response.usage.output_tokens)
             block = next((b for b in response.content if b.type == "tool_use"), None)
             if block is None:
-                last_error = ValueError("model did not return a tool_use block")
+                last_error = ValueError(
+                    f"model did not return a tool_use block (stop_reason={response.stop_reason})"
+                )
                 continue
             try:
                 return schema.model_validate(block.input)
@@ -222,7 +224,13 @@ class OpenAILLM:
 
     api_key: str
     model: str = "gpt-5"
-    max_tokens: int = 4096
+    # gpt-5 is a reasoning model: its hidden "thinking" tokens are billed
+    # from and count against this same budget, before the visible reply.
+    # 4096 (fine for Anthropic's non-reasoning default model) left zero room
+    # for the actual tool call once reasoning ran — a real production
+    # failure mode (finish_reason="length", no tool call at all), not a
+    # schema problem.
+    max_tokens: int = 16_000
     client: OpenAI | None = None  # injectable, so tests never touch the network
 
     _client: OpenAI = field(init=False, repr=False)
@@ -299,7 +307,16 @@ class OpenAILLM:
             tool_calls = response.choices[0].message.tool_calls or []
             call = next((c for c in tool_calls if c.type == "function"), None)
             if call is None:
-                last_error = ValueError("model did not return a tool call")
+                # gpt-5-class models spend part of max_completion_tokens on
+                # hidden reasoning before the visible reply; finish_reason
+                # distinguishes "ran out of budget mid-thought" (length) from
+                # "declined to call the tool" (stop) — worth surfacing since
+                # the fix differs (raise max_tokens vs. rework the prompt).
+                finish_reason = response.choices[0].finish_reason
+                last_error = ValueError(
+                    f"model did not return a tool call (finish_reason={finish_reason}, "
+                    f"output_tokens={output_tokens})"
+                )
                 continue
             try:
                 payload = json.loads(call.function.arguments)

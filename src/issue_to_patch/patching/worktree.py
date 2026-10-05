@@ -99,7 +99,11 @@ def _apply_one(worktree: Path, edit: FileEdit) -> None:
     if edit.old == "":
         raise EditApplicationError(f"empty 'old' on existing file: {edit.path}")
     if occurrences == 0:
-        raise EditApplicationError(f"'old' text not found in {edit.path}")
+        # Show what was actually proposed: an exact-match failure is silent
+        # otherwise, and "the LLM was wrong somewhere" isn't a diagnosis —
+        # a whitespace/indentation mismatch looks completely different from
+        # a wrong line entirely, and this is the only place both are visible.
+        raise EditApplicationError(f"'old' text not found in {edit.path}: {edit.old!r}")
     if occurrences > 1:
         raise EditApplicationError(
             f"'old' text is ambiguous in {edit.path} ({occurrences} matches)"

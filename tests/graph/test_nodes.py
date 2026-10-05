@@ -216,6 +216,57 @@ def test_draft_patch_records_an_error_when_the_edit_does_not_apply(fixture_repo:
     assert out["errors"]
 
 
+def test_draft_patch_falls_back_to_all_evidence_when_citation_does_not_match(
+    fixture_repo: Path,
+) -> None:
+    """Regression: a hypothesis citing a chunk_id that isn't in the evidence
+    list (LLM drift) used to leave the draft prompt with zero real file
+    content — the model then invented a plausible but nonexistent path
+    instead of citing real code. It must fall back to all code evidence."""
+    llm = FakeLLM()
+    llm.queue_structured(
+        {
+            "message": "fix: correct add()",
+            "edits": [
+                {
+                    "path": "calculator.py",
+                    "old": "return a - b  # BUG: should be a + b",
+                    "new": "return a + b",
+                }
+            ],
+        }
+    )
+    snap = create_snapshot(str(fixture_repo), fixture_repo.parent / "snap", repo_name="acme/calc")
+    state = new_state(run_id="r1", issue_ref="x")
+    state["repository"] = snap
+    state["issue"] = IssueRequest(source=IssueSource.RAW_TEXT, source_ref="x", title="t", body="b")
+    state["hypotheses"] = [
+        Hypothesis(
+            summary="bug",
+            confidence=0.8,
+            # chunk_id doesn't match the evidence below at all.
+            cites=[
+                SourceLocation(
+                    chunk_id="does-not-exist", path="calculator.py", line_start=1, line_end=2
+                )
+            ],
+        )
+    ]
+    state["evidence"] = [
+        Evidence(
+            kind="code",
+            content="def add(a, b):\n    return a - b  # BUG: should be a + b\n",
+            source_location=SourceLocation(
+                chunk_id="real-chunk", path="calculator.py", line_start=1, line_end=2
+            ),
+            score=0.9,
+        )
+    ]
+    nodes.draft_patch(state, _deps(fixture_repo.parent, llm))
+    prompt = "\n".join(m.content for m in llm.calls[0])
+    assert "return a - b" in prompt  # real file content reached the model
+
+
 def test_revise_patch_bumps_the_revision_counter(fixture_repo: Path) -> None:
     llm = FakeLLM()
     llm.queue_structured(
@@ -241,6 +292,40 @@ def test_revise_patch_bumps_the_revision_counter(fixture_repo: Path) -> None:
     out = nodes.revise_patch(state, _deps(fixture_repo.parent, llm))
     assert out["revisions_used"] == 1
     assert out["candidate_patch"] is not None
+
+
+def test_revise_patch_uses_errors_when_the_previous_attempt_never_reached_validation(
+    fixture_repo: Path,
+) -> None:
+    """Regression: when draft_patch fails to *apply* (bad 'old' text), the
+    router sends it straight to revise_patch without ever running
+    validation, so state["validation"] is None. revise_patch used to build
+    its revision_note from validation.failures only, so the retry received
+    'Previous attempt failed: ' with nothing after the colon — no signal at
+    all about what to fix. It must fall back to state["errors"]."""
+    llm = FakeLLM()
+    llm.queue_structured(
+        {
+            "message": "fix",
+            "edits": [
+                {
+                    "path": "calculator.py",
+                    "old": "return a - b  # BUG: should be a + b",
+                    "new": "return a + b",
+                }
+            ],
+        }
+    )
+    snap = create_snapshot(str(fixture_repo), fixture_repo.parent / "snap", repo_name="acme/calc")
+    state = new_state(run_id="r1", issue_ref="x")
+    state["repository"] = snap
+    state["issue"] = IssueRequest(source=IssueSource.RAW_TEXT, source_ref="x", title="t", body="b")
+    state["validation"] = None
+    state["errors"] = ["draft_patch: 'old' text is ambiguous in calculator.py (2 matches)"]
+
+    nodes.revise_patch(state, _deps(fixture_repo.parent, llm))
+    prompt = "\n".join(m.content for m in llm.calls[0])
+    assert "ambiguous in calculator.py" in prompt
 
 
 # -- RunPatchValidation ------------------------------------------------------
@@ -375,6 +460,30 @@ def test_evaluate_run_summarizes_the_state(tmp_path: Path) -> None:
             ),
             RunState.PATCH_REQUIRES_HUMAN_REVIEW,
         ),
+        (
+            # Regression: errors is a purely additive log (operator.add,
+            # state.py) that's never cleared. A first draft_patch attempt
+            # that failed and was then successfully revised still leaves its
+            # error sitting in state["errors"] — that stale error must not
+            # override a real human approval of the (successfully revised)
+            # patch that actually got validated.
+            lambda s: (
+                s.__setitem__("errors", ["draft_patch: 'old' text not found in x.py"]),
+                s.__setitem__(
+                    "candidate_patch",
+                    PatchArtifact(
+                        base_sha="a",
+                        commit_sha="b",
+                        changed_files=["x.py"],
+                        added_lines=1,
+                        removed_lines=0,
+                        patch_text="diff --git",
+                    ),
+                ),
+                s.__setitem__("human_decision", HumanDecision(decision="approve")),
+            ),
+            RunState.PATCH_VALIDATED,
+        ),
     ],
 )
 def test_persist_run_determines_the_right_final_state(tmp_path, build_state, expected) -> None:
@@ -397,3 +506,60 @@ def test_persist_run_records_the_llms_tracked_cost(tmp_path: Path) -> None:
     run = deps.store.get_run("r1")
     assert run is not None
     assert run.cost_usd == 0.0042
+
+
+def test_complete_patch_retains_uncited_test_and_respects_explicit_scope(
+    fixture_repo: Path,
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLM()
+    llm.queue_structured(
+        {
+            "message": "fix addition with regression coverage",
+            "edits": [
+                {
+                    "path": "calculator.py",
+                    "old": "return a - b  # BUG: should be a + b",
+                    "new": "return a + b",
+                },
+                {
+                    "path": "test_calculator.py",
+                    "old": "assert add(2, 3) == 5",
+                    "new": "assert add(2, 3) == 5\n    assert add(-1, 1) == 0",
+                },
+            ],
+        }
+    )
+    snap = create_snapshot(str(fixture_repo), tmp_path / "snap", repo_name="acme/calc")
+    state = new_state(run_id="complete", issue_ref="addition bug")
+    state["repository"] = snap
+    state["issue"] = IssueRequest(
+        source=IssueSource.RAW_TEXT,
+        source_ref="x",
+        title="addition bug",
+        body="wrong sum",
+    )
+    state["evidence"] = [
+        Evidence(
+            kind="code",
+            content=(fixture_repo / path).read_text(),
+            source_location=SourceLocation(chunk_id=path, path=path, line_start=1, line_end=5),
+        )
+        for path in ("calculator.py", "test_calculator.py")
+    ]
+    loc = state["evidence"][0].source_location
+    assert loc is not None
+    state["selected_files"] = [loc]
+    state["hypotheses"] = [Hypothesis(summary="wrong operator", confidence=0.9, cites=[loc])]
+    deps = _deps(tmp_path, llm)
+    output = nodes.draft_patch(state, deps)
+    patch = output["candidate_patch"]
+    assert set(patch.changed_files) == {"calculator.py", "test_calculator.py"}
+    prompt = llm.calls[0][-1].content
+    assert "Supporting evidence: test_calculator.py" in prompt
+    assert "assert add(2, 3) == 5" in prompt
+    state["candidate_patch"] = patch
+    assert nodes.run_patch_validation(state, deps)["validation"].ok
+    state["allowed_scope"] = ["calculator.py"]
+    report = nodes.run_patch_validation(state, deps)["validation"]
+    assert any(c.name == "scope" for c in report.failures)

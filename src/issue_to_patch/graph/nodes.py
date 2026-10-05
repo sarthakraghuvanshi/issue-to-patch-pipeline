@@ -34,6 +34,7 @@ from issue_to_patch.ingestion.models import IssueRequest, stable_hash
 from issue_to_patch.ingestion.normalize import normalize_issue
 from issue_to_patch.llm.client import Message
 from issue_to_patch.logging import get_logger
+from issue_to_patch.patching.context import PATCH_INSTRUCTIONS, effective_scope, evidence_catalog
 from issue_to_patch.patching.models import EditPlan
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.patching.worktree import EditApplicationError, generate_patch
@@ -260,7 +261,16 @@ def draft_patch(state: InvestigationState, deps: GraphDependencies) -> dict[str,
 # -- 10. RevisePatch (shares DraftPatch's LLM call, with failure context) --
 def revise_patch(state: InvestigationState, deps: GraphDependencies) -> dict[str, object]:
     validation = state.get("validation")
-    failures = "; ".join(c.detail or c.name for c in validation.failures) if validation else ""
+    if validation is not None:
+        failures = "; ".join(c.detail or c.name for c in validation.failures)
+    else:
+        # route_after_draft sends an edit that failed to *apply* (file
+        # missing, 'old' not found/ambiguous, ...) straight here without
+        # ever running validation — state["validation"] stays None. Without
+        # this fallback the retry got "Previous attempt failed: " (nothing
+        # after the colon) and had no way to know what to fix, so it just
+        # repeated the identical mistake.
+        failures = "; ".join(state.get("errors") or [])
     result = _draft_or_reject(state, deps, revision_note=f"Previous attempt failed: {failures}")
     result["revisions_used"] = 1  # additive reducer -> total attempts so far
     return result
@@ -281,7 +291,7 @@ def _draft_or_reject(
             issue,
             top,
             code_evidence,
-            state.get("allowed_scope") or [],
+            effective_scope(state),
             deps,
             revision_note=revision_note,
         )
@@ -291,7 +301,9 @@ def _draft_or_reject(
                 "errors": ["draft_patch: PatchReviewer rejected the draft"],
             }
     else:
-        edit_plan = _propose_edit_plan_single(issue, top, code_evidence, deps, revision_note)
+        edit_plan = _propose_edit_plan_single(
+            issue, top, code_evidence, deps, revision_note, effective_scope(state)
+        )
 
     return _apply_edit_plan(state, edit_plan)
 
@@ -302,29 +314,20 @@ def _propose_edit_plan_single(
     code_evidence: list[Evidence],
     deps: GraphDependencies,
     revision_note: str,
+    allowed_scope: list[str] | None = None,
 ) -> EditPlan:
-    # SourceLocation isn't hashable (a plain pydantic model), so this has to
-    # stay a list membership check, not a set.
-    cited = top.cites if top else []
-    files_catalog = "\n\n".join(
-        f"{e.source_location.path}:{e.source_location.line_start}-{e.source_location.line_end}\n"
-        f"{e.content}"
-        for e in code_evidence
-        if e.source_location and e.source_location in cited
-    )
+    files_catalog = evidence_catalog(code_evidence, top)
     messages = [
         Message(
             role="system",
-            content=(
-                "Draft the smallest edit plan that fixes the bug. Each edit's 'old' text "
-                "must match the file content exactly and appear only once."
-            ),
+            content=PATCH_INSTRUCTIONS,
         ),
         Message(
             role="user",
             content=(
                 f"Issue: {issue.title}\n{issue.body}\n\n"
                 f"Root cause: {top.summary if top else 'unknown'}\n\n"
+                f"Allowed scope: {allowed_scope or 'not specified'}\n"
                 f"Files:\n{files_catalog}\n\n{revision_note}"
             ),
         ),
@@ -347,7 +350,7 @@ def run_patch_validation(state: InvestigationState, deps: GraphDependencies) -> 
     repo = state["repository"]
     patch = state["candidate_patch"]
     assert repo is not None and patch is not None
-    scope = state.get("allowed_scope") or [loc.path for loc in state["selected_files"]] or ["**"]
+    scope = effective_scope(state)
     report = validate_patch(repo, patch, allowed_scope=scope)
     return {"validation": report}
 
@@ -427,9 +430,11 @@ def _write(path: Path, text: str) -> Path:
 
 
 def _determine_final_state(state: InvestigationState) -> RunState:
-    if state.get("errors"):
-        return RunState.INVESTIGATION_INCONCLUSIVE
-
+    # state["errors"] is a purely additive log (operator.add reducer,
+    # state.py) that's never cleared — an error from an attempt that was
+    # later successfully revised still sits in it. It must never override a
+    # real human decision or a validation result that both say otherwise;
+    # it only matters as the last-resort "nothing else to go on" case below.
     decision = state.get("human_decision")
     if decision is not None:
         if decision.decision == "approve":

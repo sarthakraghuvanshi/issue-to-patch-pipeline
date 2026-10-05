@@ -23,6 +23,7 @@ from issue_to_patch.graph.deps import GraphDependencies
 from issue_to_patch.graph.state import Evidence, Hypothesis
 from issue_to_patch.ingestion.models import IssueRequest
 from issue_to_patch.llm.client import Message
+from issue_to_patch.patching.context import PATCH_INSTRUCTIONS, evidence_catalog
 from issue_to_patch.patching.models import EditPlan
 from issue_to_patch.processing.parser import is_probably_test_path
 
@@ -111,29 +112,20 @@ def patch_author(
     deps: GraphDependencies,
     *,
     revision_note: str = "",
+    allowed_scope: list[str] | None = None,
 ) -> EditPlan:
-    # SourceLocation isn't hashable (a plain pydantic model), so this has to
-    # stay a list membership check, not a set.
-    cited = hypothesis.cites if hypothesis else []
-    files_catalog = "\n\n".join(
-        f"{e.source_location.path}:{e.source_location.line_start}-{e.source_location.line_end}\n"
-        f"{e.content}"
-        for e in code_evidence
-        if e.source_location and e.source_location in cited
-    )
+    files_catalog = evidence_catalog(code_evidence, hypothesis)
     messages = [
         Message(
             role="system",
-            content=(
-                "Draft the smallest edit plan that fixes the bug. Each edit's 'old' text "
-                "must match the file content exactly and appear only once."
-            ),
+            content=PATCH_INSTRUCTIONS,
         ),
         Message(
             role="user",
             content=(
                 f"Issue: {issue.title}\n{issue.body}\n\n"
                 f"Root cause: {hypothesis.summary if hypothesis else 'unknown'}\n\n"
+                f"Allowed scope: {allowed_scope or 'not specified'}\n"
                 f"Files:\n{files_catalog}\n\n{revision_note}"
             ),
         ),
@@ -171,7 +163,7 @@ def patch_reviewer(
             content=(
                 f"Issue: {issue.title}\n\n"
                 f"Edit plan message: {edit_plan.message}\n"
-                f"Changed paths: {edit_plan.paths()}\n"
+                f"Actual edits (old and new text): {edit_plan.model_dump_json()}\n"
                 f"Allowed scope: {allowed_scope or '(none given)'}\n"
                 f"Covering tests: {test_plan.existing_tests}"
             ),
@@ -201,7 +193,14 @@ def run_draft_pipeline(
     """None means the Patch Reviewer rejected the draft — the caller treats
     that exactly like an edit plan that failed to apply (revise-or-reject),
     never as a crash."""
-    edit_plan = patch_author(issue, hypothesis, code_evidence, deps, revision_note=revision_note)
+    edit_plan = patch_author(
+        issue,
+        hypothesis,
+        code_evidence,
+        deps,
+        revision_note=revision_note,
+        allowed_scope=allowed_scope,
+    )
     repo_map = repository_cartographer(code_evidence)
     test_plan = select_covering_tests(repo_map, edit_plan)
     review = patch_reviewer(issue, edit_plan, test_plan, allowed_scope, deps)

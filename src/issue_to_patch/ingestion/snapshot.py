@@ -90,7 +90,10 @@ def discard_snapshot(snapshot: RepositorySnapshot) -> None:
 
 def load_snapshot(snapshot_dir: Path) -> RepositorySnapshot:
     """Rebuild a :class:`RepositorySnapshot` from an on-disk snapshot directory."""
-    snapshot_dir = Path(snapshot_dir)
+    # Resolve to absolute: downstream code (patch validation) clones this path
+    # from a different working directory, where a relative path would resolve
+    # to the wrong place.
+    snapshot_dir = Path(snapshot_dir).resolve()
     manifest_path = snapshot_dir / MANIFEST_NAME
     if not manifest_path.exists():
         raise RepositoryNotFound(f"no {MANIFEST_NAME} in {snapshot_dir}")
