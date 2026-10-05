@@ -83,6 +83,11 @@ class HumanDecision(BaseModel):
     reason: str = ""
     reviewer: str = "human"
     role: ReviewerRole = ReviewerRole.GATEKEEPER
+    # True only when `reviewer`/`role` came from a real per-user account
+    # (api/deps.py's get_current_user), not the shared ITP_API_KEY, local
+    # no-auth fallback, or a free-text CLI flag — the one signal that says
+    # this role claim was actually verified, not just typed into a form.
+    authenticated: bool = False
 
 
 class EvaluationReport(BaseModel):

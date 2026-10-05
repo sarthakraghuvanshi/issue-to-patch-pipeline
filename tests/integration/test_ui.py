@@ -135,6 +135,12 @@ async def test_run_detail_page_shows_diagnosis_diff_and_decision_buttons(client:
     # decide() builds the real API route (/runs/<id>/approve) from
     # location.pathname at click-time rather than a baked-in per-page URL.
     assert "'/runs/' + runId + '/approve'" in body
+    # the legacy free-text fields are present by default (no way to know
+    # who's signed in on a plain page load) but wired to be hidden once a
+    # real account is confirmed client-side.
+    assert 'id="legacy-reviewer-fields"' in body
+    assert 'id="whoami-status"' in body
+    assert "refreshWhoami" in body
 
 
 async def test_run_detail_page_after_approval_shows_final_state_not_buttons(

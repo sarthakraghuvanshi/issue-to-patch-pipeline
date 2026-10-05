@@ -2,41 +2,72 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from pydantic import SecretStr
 
-from issue_to_patch.api.deps import rate_limit, require_auth
+from issue_to_patch.api.deps import CurrentUser, get_current_user, rate_limit
 from issue_to_patch.config.settings import Settings
+from issue_to_patch.persistence import Store
 
 
 def _settings(**overrides: object) -> Settings:
     return Settings(**overrides)  # type: ignore[arg-type]
 
 
-async def test_require_auth_passes_when_no_key_is_configured() -> None:
-    await require_auth(_settings(), authorization=None)  # no exception raised
+def _store(tmp_path: Path) -> Store:
+    store = Store(f"sqlite+pysqlite:///{tmp_path / 'deps.db'}")
+    store.create_all()
+    return store
 
 
-async def test_require_auth_rejects_a_missing_header() -> None:
+async def test_get_current_user_falls_back_to_local_when_no_key_is_configured(
+    tmp_path: Path,
+) -> None:
+    user = await get_current_user(_settings(), _store(tmp_path), authorization=None)
+    assert user.authenticated is False
+    assert user.role == "gatekeeper"
+
+
+async def test_get_current_user_rejects_a_missing_header_when_a_key_is_configured(
+    tmp_path: Path,
+) -> None:
     settings = _settings(api_key=SecretStr("secret"))
     with pytest.raises(HTTPException) as exc:
-        await require_auth(settings, authorization=None)
+        await get_current_user(settings, _store(tmp_path), authorization=None)
     assert exc.value.status_code == 401
 
 
-async def test_require_auth_rejects_the_wrong_token() -> None:
+async def test_get_current_user_rejects_the_wrong_token(tmp_path: Path) -> None:
     settings = _settings(api_key=SecretStr("secret"))
     with pytest.raises(HTTPException) as exc:
-        await require_auth(settings, authorization="Bearer wrong")
+        await get_current_user(settings, _store(tmp_path), authorization="Bearer wrong")
     assert exc.value.status_code == 401
 
 
-async def test_require_auth_accepts_the_right_token() -> None:
+async def test_get_current_user_accepts_the_shared_key(tmp_path: Path) -> None:
     settings = _settings(api_key=SecretStr("secret"))
-    await require_auth(settings, authorization="Bearer secret")  # no exception raised
+    user = await get_current_user(settings, _store(tmp_path), authorization="Bearer secret")
+    assert user.authenticated is False
+    assert user.role == "gatekeeper"
+
+
+async def test_get_current_user_resolves_a_real_per_user_account(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    api_key = store.create_user(username="alice", role="auditor")
+    user = await get_current_user(_settings(), store, authorization=f"Bearer {api_key}")
+    assert user == CurrentUser(username="alice", role="auditor", authenticated=True)
+
+
+async def test_get_current_user_ignores_a_disabled_users_key(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    api_key = store.create_user(username="alice", role="auditor")
+    store.disable_user("alice")
+    user = await get_current_user(_settings(), store, authorization=f"Bearer {api_key}")
+    assert user.authenticated is False  # falls back to local, same as no key at all
 
 
 async def test_rate_limit_allows_requests_under_the_limit() -> None:

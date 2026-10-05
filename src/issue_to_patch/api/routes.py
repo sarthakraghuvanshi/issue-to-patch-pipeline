@@ -19,11 +19,12 @@ from issue_to_patch.api._common import load_or_404 as _load_or_404
 from issue_to_patch.api._common import to_response as _to_response
 from issue_to_patch.api.deps import (
     CheckpointerDep,
+    CurrentUserDep,
     GraphDepsDep,
     SettingsDep,
     StoreDep,
+    get_current_user,
     rate_limit,
-    require_auth,
 )
 from issue_to_patch.api.schemas import (
     ApproveRequest,
@@ -40,6 +41,7 @@ from issue_to_patch.api.schemas import (
     SearchResultOut,
     SourceLocationOut,
     StartRunRequest,
+    UserOut,
     ValidatePatchRequest,
     ValidatePatchResponse,
 )
@@ -56,10 +58,11 @@ from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
 from issue_to_patch.retrieval import RetrievalService, SearchFilters
 from issue_to_patch.run_states import RunState
 
-_AUTHED = [Depends(require_auth), Depends(rate_limit)]
+_AUTHED = [Depends(get_current_user), Depends(rate_limit)]
 
 runs_router = APIRouter(prefix="/runs", tags=["runs"], dependencies=_AUTHED)
 tools_router = APIRouter(tags=["tools"], dependencies=_AUTHED)
+users_router = APIRouter(prefix="/users", tags=["users"], dependencies=_AUTHED)
 
 _VALID_DECISIONS = {"approve", "reject", "revise"}
 _VALID_ROLES = {"gatekeeper", "auditor", "strategist"}
@@ -129,11 +132,21 @@ def get_run(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) -> R
 
 @runs_router.post("/{run_id}/approve", response_model=RunStateResponse)
 def approve_run(
-    run_id: str, body: ApproveRequest, deps: GraphDepsDep, checkpointer: CheckpointerDep
+    run_id: str,
+    body: ApproveRequest,
+    deps: GraphDepsDep,
+    checkpointer: CheckpointerDep,
+    current_user: CurrentUserDep,
 ) -> RunStateResponse:
     if body.decision not in _VALID_DECISIONS:
         raise HTTPException(422, f"decision must be one of {sorted(_VALID_DECISIONS)}")
-    if body.role not in _VALID_ROLES:
+    # A real per-user account's role wins, full stop — the request body's
+    # role/reviewer are only ever trusted for the legacy shared-key/local
+    # fallback, where there's no real identity to defer to in the first
+    # place (same free-text behavior this project has always had).
+    role = current_user.role if current_user.authenticated else body.role
+    reviewer = current_user.username if current_user.authenticated else body.reviewer
+    if role not in _VALID_ROLES:
         raise HTTPException(422, f"role must be one of {sorted(_VALID_ROLES)}")
     handle = _load_or_404(run_id, deps, checkpointer)
     if not handle.awaiting_human:
@@ -141,10 +154,26 @@ def approve_run(
     resumed = resume_investigation(
         handle,
         HumanDecision(
-            decision=body.decision, reason=body.reason, reviewer=body.reviewer, role=body.role
+            decision=body.decision,
+            reason=body.reason,
+            reviewer=reviewer,
+            role=role,
+            authenticated=current_user.authenticated,
         ),
     )
     return _to_response(resumed)
+
+
+@users_router.get("/me", response_model=UserOut)
+def whoami(current_user: CurrentUserDep) -> UserOut:
+    """Lets the web UI ask "who does the server think I am" after a page
+    has already loaded — a plain page navigation can't carry a bearer
+    header, so this is the only way the browser finds out."""
+    return UserOut(
+        username=current_user.username,
+        role=current_user.role,
+        authenticated=current_user.authenticated,
+    )
 
 
 @runs_router.get("/{run_id}/retrieval", response_model=RetrievalResponse)

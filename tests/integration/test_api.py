@@ -95,6 +95,7 @@ async def test_openapi_schema_lists_every_endpoint(client: tuple) -> None:
         "/runs/{run_id}/audit",
         "/runs/{run_id}/build",
         "/runs/{run_id}/push",
+        "/users/me",
         "/search",
         "/validate-patch",
     }
@@ -349,6 +350,89 @@ async def test_a_risky_patch_needs_the_gatekeeper_role_via_the_api(client: tuple
     assert denied.status_code == 200
     assert denied.json()["status"] == "PATCH_REQUIRES_HUMAN_REVIEW"
     assert store.get_run_state(run_id) == "PATCH_REQUIRES_HUMAN_REVIEW"
+
+
+async def test_a_real_auditor_account_cannot_lie_its_way_to_gatekeeper(client: tuple) -> None:
+    """The actual security fix: before per-user accounts, anyone holding the
+    one shared key could just type role=gatekeeper in the request body and
+    clear a risky patch. A real account's role must win regardless of what
+    the body claims."""
+    async_client, snap_dir, llm, store = client
+    llm.queue_structured({"search_queries": [], "focus_areas": []})
+    llm.queue_structured({"hypotheses": [{"summary": "ci needs a fix", "confidence": 0.9}]})
+    llm.queue_structured(
+        {
+            "message": "fix: adjust ci",
+            "edits": [{"path": ".github/workflows/deploy.yml", "old": "", "new": "name: deploy\n"}],
+        }
+    )
+    started = await async_client.post(
+        "/runs",
+        json={"issue": "ci is broken", "snapshot": str(snap_dir), "scope": [".github/**"]},
+    )
+    run_id = started.json()["run_id"]
+
+    auditor_key = store.create_user(username="eve", role="auditor")
+    denied = await async_client.post(
+        f"/runs/{run_id}/approve",
+        json={"decision": "approve", "reviewer": "someone-else", "role": "gatekeeper"},
+        headers={"Authorization": f"Bearer {auditor_key}"},
+    )
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "PATCH_REQUIRES_HUMAN_REVIEW"
+    assert store.get_run_state(run_id) == "PATCH_REQUIRES_HUMAN_REVIEW"
+
+    decisions = store.list_human_decisions(run_id)
+    assert decisions[-1].reviewer == "eve"  # the real identity, not the body's lie
+    assert decisions[-1].role == "auditor"
+    assert decisions[-1].authenticated is True
+
+
+async def test_a_real_gatekeeper_account_clears_a_risky_patch(client: tuple) -> None:
+    async_client, snap_dir, llm, store = client
+    llm.queue_structured({"search_queries": [], "focus_areas": []})
+    llm.queue_structured({"hypotheses": [{"summary": "ci needs a fix", "confidence": 0.9}]})
+    llm.queue_structured(
+        {
+            "message": "fix: adjust ci",
+            "edits": [{"path": ".github/workflows/deploy.yml", "old": "", "new": "name: deploy\n"}],
+        }
+    )
+    started = await async_client.post(
+        "/runs",
+        json={"issue": "ci is broken", "snapshot": str(snap_dir), "scope": [".github/**"]},
+    )
+    run_id = started.json()["run_id"]
+
+    gatekeeper_key = store.create_user(username="alice", role="gatekeeper")
+    approved = await async_client.post(
+        f"/runs/{run_id}/approve",
+        json={"decision": "approve"},
+        headers={"Authorization": f"Bearer {gatekeeper_key}"},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "PATCH_VALIDATED"
+
+    decisions = store.list_human_decisions(run_id)
+    assert decisions[-1].reviewer == "alice"
+    assert decisions[-1].authenticated is True
+
+
+async def test_whoami_reports_a_real_account(client: tuple) -> None:
+    async_client, _snap_dir, _llm, store = client
+    api_key = store.create_user(username="alice", role="gatekeeper")
+    response = await async_client.get("/users/me", headers={"Authorization": f"Bearer {api_key}"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"username": "alice", "role": "gatekeeper", "authenticated": True}
+
+
+async def test_whoami_reports_the_local_fallback_when_no_key_is_sent(client: tuple) -> None:
+    async_client, _snap_dir, _llm, _store = client
+    response = await async_client.get("/users/me")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["authenticated"] is False
 
 
 async def test_approve_before_awaiting_review_is_a_conflict(client: tuple) -> None:

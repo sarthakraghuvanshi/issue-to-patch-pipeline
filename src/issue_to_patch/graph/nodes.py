@@ -374,6 +374,7 @@ def request_human_validation(
         reviewer=decision.reviewer,
         decision=decision.decision,
         reason=decision.reason,
+        authenticated=decision.authenticated,
     )
     return {}
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -110,11 +110,33 @@ class HumanDecisionRow(Base):
     reviewer: Mapped[str] = mapped_column(String(255))
     decision: Mapped[str] = mapped_column(String(16))
     reason: Mapped[str] = mapped_column(Text, default="")
+    # True only when `reviewer`/`role` came from a real per-user account
+    # (api/deps.py's get_current_user), not the shared ITP_API_KEY or local
+    # no-auth fallback — the one honest "was this claim actually verified"
+    # signal in the audit trail.
+    authenticated: Mapped[bool] = mapped_column(Boolean, default=False)
     ts: Mapped[datetime] = mapped_column()
     prev_hash: Mapped[str] = mapped_column(String(64))
     row_hash: Mapped[str] = mapped_column(String(64))
 
     run: Mapped[Run] = relationship(back_populates="human_decisions")
+
+
+class User(Base):
+    """A real, individually-held credential — as opposed to the single
+    shared ITP_API_KEY, which is all-or-nothing. `role` is set by whoever
+    creates the account (an operator with CLI access), not chosen by the
+    holder of the key."""
+
+    __tablename__ = "users"
+
+    username: Mapped[str] = mapped_column(String(255), primary_key=True)
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column()
+    # Revoke access without losing the audit trail of what they already
+    # did — disabling, not deleting.
+    disabled_at: Mapped[datetime | None] = mapped_column(default=None)
 
 
 class Artifact(Base):

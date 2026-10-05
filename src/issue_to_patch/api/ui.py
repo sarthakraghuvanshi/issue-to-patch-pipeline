@@ -226,10 +226,20 @@ def _decision_form() -> str:
     # No run_id parameter needed: decide() (in the page-shell-level
     # _PAGE_SCRIPT, not duplicated per-run) reads it straight out of
     # location.pathname once this page is the one on screen.
+    #
+    # The reviewer/role fields below are a LEGACY fallback, not a real
+    # choice: a plain page load has no way to know who's signed in (no
+    # bearer header on navigation), so they're shown by default. Once
+    # refreshWhoami() confirms a real per-user key, it hides this block and
+    # shows a plain "Signed in as X (role)" line instead — the server
+    # ignores these two fields entirely once a real account is presented,
+    # so hiding them here just makes that honest.
     return """
 <h2>Review</h2>
+<p id="whoami-status" role="status" aria-live="polite"></p>
 <label for="api-key">Workspace API key (optional for local use)</label>
 <input id="api-key" type="password" placeholder="leave blank for local/no-auth use">
+<div id="legacy-reviewer-fields">
 <label for="reviewer">Reviewer name</label>
 <input id="reviewer" value="human">
 <label for="role">Role</label>
@@ -238,6 +248,7 @@ def _decision_form() -> str:
   <option value="auditor">auditor</option>
   <option value="strategist">strategist</option>
 </select>
+</div>
 <label for="reason">Reason (optional)</label>
 <input id="reason" placeholder="">
 <div style="margin-top:1rem">

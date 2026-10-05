@@ -9,6 +9,35 @@ function prefillSavedFields() {
     var savedRemote = localStorage.getItem('itp_push_remote_url');
     if (savedRemote) remoteEl.value = savedRemote;
   }
+  refreshWhoami();
+}
+
+async function refreshWhoami() {
+  // A plain page load can't know who's signed in (no bearer header on
+  // navigation) — this is the only way the browser finds out, by asking
+  // with whatever key it has saved.
+  var whoamiEl = document.getElementById('whoami-status');
+  var legacyFields = document.getElementById('legacy-reviewer-fields');
+  if (!whoamiEl) return;  // not on a page with the decision form
+  try {
+    var resp = await fetch('/users/me', { headers: apiKeyHeader() });
+    if (!resp.ok) {
+      whoamiEl.textContent = '';
+      if (legacyFields) legacyFields.hidden = false;
+      return;
+    }
+    var user = await resp.json();
+    if (user.authenticated) {
+      whoamiEl.textContent = 'Signed in as ' + user.username + ' (' + user.role + ')';
+      if (legacyFields) legacyFields.hidden = true;
+    } else {
+      whoamiEl.textContent = '';
+      if (legacyFields) legacyFields.hidden = false;
+    }
+  } catch (error) {
+    whoamiEl.textContent = '';
+    if (legacyFields) legacyFields.hidden = false;
+  }
 }
 
 function apiKeyHeader() {

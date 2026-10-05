@@ -634,6 +634,64 @@ def audit(
         raise typer.Exit(3)
 
 
+@app.command("create-user")
+def create_user(
+    username: Annotated[str, typer.Argument(help="Unique name for this account")],
+    role: Annotated[
+        str, typer.Option(help="gatekeeper | auditor | strategist — see safety/permissions.py")
+    ] = "gatekeeper",
+) -> None:
+    """Create a real per-user account with its own API key. The key is
+    printed exactly once here — there is no way to recover it afterward;
+    disable the user and create a new one if it's lost."""
+    from issue_to_patch.persistence import Store
+
+    if role not in {"gatekeeper", "auditor", "strategist"}:
+        typer.echo("--role must be one of gatekeeper | auditor | strategist", err=True)
+        raise typer.Exit(2)
+    store = Store(get_settings().database_url)
+    try:
+        api_key = store.create_user(username=username, role=role)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"user created: {username} ({role})")
+    typer.echo(f"API key (copy now, shown only once): {api_key}")
+
+
+@app.command("list-users")
+def list_users() -> None:
+    """Username, role, created_at, disabled — never the key itself; only
+    its hash is ever stored, so there is nothing secret to print here."""
+    from issue_to_patch.persistence import Store
+
+    store = Store(get_settings().database_url)
+    users = store.list_users()
+    if not users:
+        typer.echo("no users yet — see `create-user`")
+        return
+    for user in users:
+        status = "disabled" if user.disabled_at is not None else "active"
+        typer.echo(f"{user.username:<20} {user.role:<12} {status:<10} {user.created_at}")
+
+
+@app.command("disable-user")
+def disable_user(
+    username: Annotated[str, typer.Argument(help="Username to revoke access for")],
+) -> None:
+    """Revokes access without deleting the user or their audit history —
+    past decisions they made stay exactly as recorded."""
+    from issue_to_patch.persistence import Store
+
+    store = Store(get_settings().database_url)
+    try:
+        store.disable_user(username)
+    except KeyError:
+        typer.echo(f"no such user: {username}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"disabled: {username}")
+
+
 @app.command()
 def judge(run_id: Annotated[str, typer.Argument(help="run_id to judge")]) -> None:
     """Score one completed run on the 5 grounded dimensions (Phase 9) — never

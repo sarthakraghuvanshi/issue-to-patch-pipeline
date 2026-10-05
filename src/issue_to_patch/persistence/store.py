@@ -8,11 +8,14 @@ the audit story (Sprint 7) builds on.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from issue_to_patch.ingestion.models import stable_hash
@@ -23,6 +26,7 @@ from issue_to_patch.persistence.models import (
     HumanDecisionRow,
     Run,
     ToolCall,
+    User,
 )
 
 _GENESIS_HASH = "0" * 64
@@ -148,11 +152,24 @@ class Store:
 
     # -- append-only human decisions ---------------------------------
     def record_human_decision(
-        self, run_id: str, *, role: str, reviewer: str, decision: str, reason: str
+        self,
+        run_id: str,
+        *,
+        role: str,
+        reviewer: str,
+        decision: str,
+        reason: str,
+        authenticated: bool = False,
     ) -> str:
         """Its own hash chain, same technique as :meth:`record_tool_call` —
         a decision is a different kind of event than a tool call, so it gets
-        its own append-only sequence rather than being interleaved into one."""
+        its own append-only sequence rather than being interleaved into one.
+
+        ``authenticated`` is deliberately NOT folded into the hash chain:
+        the chain formula is fixed by every row already written before this
+        field existed, and changing it would make every pre-existing,
+        legitimate decision look tampered.
+        """
         with self.session() as session:
             last = session.scalars(
                 select(HumanDecisionRow)
@@ -174,6 +191,7 @@ class Store:
                     reviewer=reviewer,
                     decision=decision,
                     reason=reason,
+                    authenticated=authenticated,
                     ts=ts,
                     prev_hash=prev_hash,
                     row_hash=row_hash,
@@ -320,3 +338,59 @@ class Store:
                 .filter(ChunkRow.repository == repository, ChunkRow.commit_sha == commit_sha)
                 .count()
             )
+
+    # -- per-user accounts ------------------------------------------
+    def create_user(self, *, username: str, role: str) -> str:
+        """Generates a new API key and returns it in plaintext — this is the
+        only time it is ever visible; only its hash is stored. Raises
+        ``ValueError`` if ``username`` already exists."""
+        api_key = f"itp_{secrets.token_urlsafe(32)}"
+        api_key_hash = _hash_api_key(api_key)
+        with self.session() as session:
+            session.add(
+                User(
+                    username=username,
+                    api_key_hash=api_key_hash,
+                    role=role,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                session.rollback()
+                raise ValueError(f"username already exists: {username}") from exc
+        return api_key
+
+    def get_user_by_api_key(self, api_key: str) -> User | None:
+        """None if the key is wrong, unknown, or belongs to a disabled user."""
+        with self.session() as session:
+            user = session.scalar(select(User).where(User.api_key_hash == _hash_api_key(api_key)))
+            if user is None or user.disabled_at is not None:
+                return None
+            session.expunge(user)
+            return user
+
+    def list_users(self) -> list[User]:
+        with self.session() as session:
+            rows = list(session.scalars(select(User).order_by(User.created_at)))
+            for row in rows:
+                session.expunge(row)
+            return rows
+
+    def disable_user(self, username: str) -> None:
+        """Revokes access without deleting the user or their audit history."""
+        with self.session() as session:
+            user = session.get(User, username)
+            if user is None:
+                raise KeyError(username)
+            user.disabled_at = datetime.now(UTC)
+
+
+def _hash_api_key(api_key: str) -> str:
+    # Unsalted SHA-256 is fine here specifically because the input is a
+    # high-entropy, server-generated random token (create_user, above), not
+    # a human-chosen password — there is no dictionary/rainbow-table risk to
+    # guard against, so this avoids pulling in bcrypt/argon2 for a case
+    # where they would add dependency weight without adding real security.
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()

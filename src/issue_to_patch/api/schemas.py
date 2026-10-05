@@ -113,6 +113,15 @@ class PushResponse(BaseModel):
     detail: str
 
 
+class UserOut(BaseModel):
+    username: str
+    role: str
+    authenticated: bool = Field(
+        description="True only for a real per-user account — false for the "
+        "shared ITP_API_KEY or local no-auth fallback"
+    )
+
+
 class SearchRequest(BaseModel):
     query: str
     repo: str

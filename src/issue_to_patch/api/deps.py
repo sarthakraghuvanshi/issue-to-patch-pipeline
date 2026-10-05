@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -57,15 +58,45 @@ def get_graph_dependencies(settings: SettingsDep, store: StoreDep) -> GraphDepen
 GraphDepsDep = Annotated[GraphDependencies, Depends(get_graph_dependencies)]
 
 
-async def require_auth(
-    settings: SettingsDep, authorization: Annotated[str | None, Header()] = None
-) -> None:
-    """``None`` api_key disables auth — local dev only; Settings itself
-    refuses to start with no key outside local/ci (see config/settings.py)."""
+@dataclass(frozen=True)
+class CurrentUser:
+    """Who's making this request — a real per-user account, or one of the
+    two synthetic fallbacks that keep today's single-shared-key / local-dev
+    behavior working unchanged for anyone who hasn't created real accounts.
+    ``authenticated`` is the one field that distinguishes "a verified
+    identity" from "whoever had the shared key or is running this locally"
+    — only the former may be trusted to claim a role like gatekeeper."""
+
+    username: str
+    role: str
+    authenticated: bool
+
+
+async def get_current_user(
+    settings: SettingsDep, store: StoreDep, authorization: Annotated[str | None, Header()] = None
+) -> CurrentUser:
+    """Resolves, in order: a real per-user API key; the single shared
+    ``ITP_API_KEY``; or — only when no key is configured at all (local/ci,
+    today's no-auth-needed case) — a synthetic local user. Raises 401 only
+    when a key *is* configured and nothing presented matches it, exactly
+    like the ``require_auth`` this replaces."""
+    token = authorization.removeprefix("Bearer ") if authorization else None
+
+    if token:
+        user = store.get_user_by_api_key(token)
+        if user is not None:
+            return CurrentUser(username=user.username, role=user.role, authenticated=True)
+
     if settings.api_key is None:
-        return
-    if authorization != f"Bearer {settings.api_key.get_secret_value()}":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing or invalid bearer token")
+        return CurrentUser(username="local", role="gatekeeper", authenticated=False)
+
+    if token == settings.api_key.get_secret_value():
+        return CurrentUser(username="shared-key", role="gatekeeper", authenticated=False)
+
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing or invalid bearer token")
+
+
+CurrentUserDep = Annotated[CurrentUser, Depends(get_current_user)]
 
 
 # A fixed-window limiter keyed by client host, in-memory and single-process —

@@ -743,6 +743,30 @@
         "title": "ToolCallEntry",
         "type": "object"
       },
+      "UserOut": {
+        "properties": {
+          "authenticated": {
+            "description": "True only for a real per-user account \u2014 false for the shared ITP_API_KEY or local no-auth fallback",
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "role",
+          "authenticated"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
       "ValidatePatchRequest": {
         "properties": {
           "added_lines": {
@@ -1499,6 +1523,56 @@
         "summary": "Search",
         "tags": [
           "tools"
+        ]
+      }
+    },
+    "/users/me": {
+      "get": {
+        "description": "Lets the web UI ask \"who does the server think I am\" after a page\nhas already loaded \u2014 a plain page navigation can't carry a bearer\nheader, so this is the only way the browser finds out.",
+        "operationId": "whoami_users_me_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whoami",
+        "tags": [
+          "users"
         ]
       }
     },
