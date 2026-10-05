@@ -122,6 +122,22 @@ class UserOut(BaseModel):
     )
 
 
+class PullRequestRequest(BaseModel):
+    fork_remote_url: str = Field(description="The same remote you pushed the branch to")
+    title: str
+    body: str = ""
+    base: str | None = Field(default=None, description="Defaults to the upstream default branch")
+    github_token: str | None = Field(
+        default=None,
+        description="Needs 'repo' scope; overrides ITP_GITHUB_TOKEN for this call",
+    )
+
+
+class PullRequestResponse(BaseModel):
+    number: int
+    url: str
+
+
 class SearchRequest(BaseModel):
     query: str
     repo: str

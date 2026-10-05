@@ -52,6 +52,30 @@ def push_branch(branch_dir: Path, branch_name: str, remote_url: str) -> PushResu
     return PushResult(remote_display=display, branch=branch_name, ok=True, detail="pushed")
 
 
+def parse_github_owner_repo(url: str) -> tuple[str, str] | None:
+    """``(owner, repo)`` from a github.com remote URL — ``https://`` or
+    scp-style ``git@host:owner/repo.git``. ``None`` if it doesn't look like
+    a github.com URL at all (a different host, or a malformed path) — the
+    REST API used for pull-request creation only ever targets github.com,
+    not GitHub Enterprise."""
+    if "://" in url:
+        parts = urlsplit(url)
+        host = parts.netloc.rsplit("@", 1)[-1]
+        path = parts.path
+    else:
+        if ":" not in url:
+            return None
+        host_part, path = url.split(":", 1)
+        host = host_part.rsplit("@", 1)[-1]
+
+    if host.lower() != "github.com":
+        return None
+    segments = path.strip("/").removesuffix(".git").split("/")
+    if len(segments) != 2 or not all(segments):
+        return None
+    return segments[0], segments[1]
+
+
 def _redact_remote(url: str) -> str:
     """Strip embedded userinfo (``user:pass@``) from an ``http(s)://`` or
     ``ssh://`` URL before it's ever printed/logged — independent of what

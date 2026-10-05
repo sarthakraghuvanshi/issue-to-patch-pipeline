@@ -9,6 +9,11 @@ function prefillSavedFields() {
     var savedRemote = localStorage.getItem('itp_push_remote_url');
     if (savedRemote) remoteEl.value = savedRemote;
   }
+  var githubTokenEl = document.getElementById('github-token');
+  if (githubTokenEl) {
+    var savedGithubToken = localStorage.getItem('itp_github_token');
+    if (savedGithubToken) githubTokenEl.value = savedGithubToken;
+  }
   refreshWhoami();
 }
 
@@ -173,6 +178,55 @@ async function pushRun() {
   } catch (error) {
     status.textContent = 'Connection interrupted. Refresh to check before retrying.';
   } finally {
+    btn.disabled = false;
+  }
+}
+
+async function createPullRequest() {
+  var match = location.pathname.match(/\/ui\/runs\/([^/]+)/);
+  if (!match) return;
+  var runId = match[1];
+  var btn = document.getElementById('create-pr-btn');
+  var status = document.getElementById('pr-status');
+  var remoteEl = document.getElementById('push-remote-url');
+  var remoteUrl = remoteEl ? remoteEl.value.trim() : '';
+  var tokenEl = document.getElementById('github-token');
+  var token = tokenEl ? tokenEl.value.trim() : '';
+  if (token) localStorage.setItem('itp_github_token', token);
+  else localStorage.removeItem('itp_github_token');
+  if (!remoteUrl) {
+    status.textContent = 'Enter the fork remote you pushed to, above, first.';
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = 'Creating pull request…';
+  try {
+    var resp = await fetch('/runs/' + runId + '/pull-request', {
+      method: 'POST',
+      headers: apiKeyHeader(),
+      body: JSON.stringify({
+        fork_remote_url: remoteUrl,
+        title: document.getElementById('pr-title').value,
+        body: document.getElementById('pr-body').value,
+        github_token: token || null
+      })
+    });
+    var body = await resp.json().catch(function () { return null; });
+    if (resp.ok && body) {
+      status.textContent = 'Pull request created: ';
+      var link = document.createElement('a');
+      link.href = body.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = body.url;
+      status.appendChild(link);
+    } else {
+      status.textContent = 'Could not create pull request: ' +
+        (body ? (body.detail || JSON.stringify(body)) : await resp.text());
+      btn.disabled = false;
+    }
+  } catch (error) {
+    status.textContent = 'Connection interrupted. Refresh to check before retrying.';
     btn.disabled = false;
   }
 }

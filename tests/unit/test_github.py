@@ -141,3 +141,77 @@ async def test_etag_cache_turns_repeat_into_304() -> None:
     assert first == second == {"full_name": "o/r"}
     assert route.call_count == 2
     await client.aclose()
+
+
+@respx.mock
+async def test_post_json_sends_the_body_and_returns_the_response() -> None:
+    route = respx.post(f"{BASE}/repos/o/r/pulls").mock(
+        return_value=httpx.Response(201, json={"number": 9, "html_url": "https://x/pull/9"})
+    )
+    client = await _client()
+    body = await client.post_json("/repos/o/r/pulls", json={"title": "t", "head": "h"})
+    assert body == {"number": 9, "html_url": "https://x/pull/9"}
+    sent = route.calls.last.request.content
+    assert b'"title"' in sent and b'"t"' in sent
+    await client.aclose()
+
+
+@respx.mock
+async def test_post_json_retries_on_a_retryable_status() -> None:
+    route = respx.post(f"{BASE}/repos/o/r/pulls")
+    route.side_effect = [
+        httpx.Response(502),
+        httpx.Response(201, json={"number": 1, "html_url": "https://x/pull/1"}),
+    ]
+    client = await _client()
+    body = await client.post_json("/repos/o/r/pulls", json={"title": "t"})
+    assert body["number"] == 1
+    assert route.call_count == 2
+    await client.aclose()
+
+
+@respx.mock
+async def test_post_json_never_consults_the_etag_cache() -> None:
+    """A POST must never attach If-None-Match from a GET made to the same
+    path — a create call isn't idempotent the way a GET is."""
+    respx.get(f"{BASE}/repos/o/r/pulls").mock(
+        return_value=httpx.Response(200, json=[], headers={"ETag": '"abc"'})
+    )
+    post_route = respx.post(f"{BASE}/repos/o/r/pulls").mock(
+        return_value=httpx.Response(201, json={"number": 1, "html_url": "https://x/pull/1"})
+    )
+    client = await _client()
+    await client.get_json("/repos/o/r/pulls")
+    await client.post_json("/repos/o/r/pulls", json={"title": "t"})
+    assert "if-none-match" not in post_route.calls.last.request.headers
+    await client.aclose()
+
+
+@respx.mock
+async def test_post_json_response_is_never_cached_as_an_etag_entry() -> None:
+    respx.post(f"{BASE}/repos/o/r/pulls").mock(
+        return_value=httpx.Response(
+            201, json={"number": 1, "html_url": "https://x/pull/1"}, headers={"ETag": '"abc"'}
+        )
+    )
+    get_route = respx.get(f"{BASE}/repos/o/r/pulls").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    client = await _client()
+    await client.post_json("/repos/o/r/pulls", json={"title": "t"})
+    await client.get_json("/repos/o/r/pulls")
+    assert "if-none-match" not in get_route.calls.last.request.headers
+    await client.aclose()
+
+
+@respx.mock
+async def test_post_json_raises_github_api_error_on_a_client_error() -> None:
+    from issue_to_patch.ingestion.errors import GitHubAPIError
+
+    respx.post(f"{BASE}/repos/o/r/pulls").mock(
+        return_value=httpx.Response(422, json={"message": "already exists"})
+    )
+    client = await _client()
+    with pytest.raises(GitHubAPIError):
+        await client.post_json("/repos/o/r/pulls", json={"title": "t"})
+    await client.aclose()

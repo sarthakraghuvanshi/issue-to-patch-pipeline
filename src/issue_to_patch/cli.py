@@ -481,10 +481,11 @@ def auto(
         resume_investigation,
         sqlite_checkpointer,
     )
-    from issue_to_patch.ingestion.errors import IngestionError
+    from issue_to_patch.ingestion.errors import GitHubAPIError, IngestionError
     from issue_to_patch.logging import bind_run_id
     from issue_to_patch.patching import materialize_branch, push_branch
     from issue_to_patch.persistence import Store
+    from issue_to_patch.pull_request import ForkRemoteNotGitHub, create_pull_request
 
     if not issue_url:
         issue_url = typer.prompt("Issue URL")
@@ -615,6 +616,37 @@ def auto(
         else:
             typer.echo(f"push failed: {result.detail}", err=True)
             raise typer.Exit(1)
+
+        if not typer.confirm("Create a pull request now?", default=False):
+            raise typer.Exit(0)
+
+        top_hypothesis = handle.state["hypotheses"][0] if handle.state.get("hypotheses") else None
+        default_title = f"Fix: {top_hypothesis.summary if top_hypothesis else issue_url}"
+        pr_title = typer.prompt("PR title", default=default_title)
+        pr_body = typer.prompt("PR description", default=f"Fixes {issue_url}")
+        pr_token = token or (
+            settings.github_token.get_secret_value() if settings.github_token else None
+        )
+        if pr_token is None:
+            pr_token = typer.prompt(
+                "GitHub token for creating the PR (needs 'repo' scope)", hide_input=True
+            )
+        try:
+            pr_result = asyncio.run(
+                create_pull_request(
+                    run_dir=run_dir,
+                    branch_name=branch_name,
+                    fork_remote_url=remote,
+                    title=pr_title,
+                    body=pr_body,
+                    base=None,
+                    token=pr_token,
+                )
+            )
+        except (ForkRemoteNotGitHub, GitHubAPIError) as exc:
+            typer.echo(f"pull request failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"pull request opened: {pr_result.url}")
 
 
 @app.command()

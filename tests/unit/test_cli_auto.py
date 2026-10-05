@@ -6,6 +6,7 @@ tests/unit/test_cli_investigate.py)."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -158,6 +159,115 @@ def test_auto_can_push_to_a_configured_remote(
         check=True,
     ).stdout
     assert f"itp/{run_id}" in ls_remote
+
+
+@respx.mock
+def test_auto_declining_the_pull_request_prompt_stops_cleanly(
+    fixture_repo: Path, auto_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_github()
+    _patch_fake_llm(monkeypatch)
+
+    bare = auto_env / "bare.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True)
+    monkeypatch.setenv("ITP_PUSH_REMOTE_URL", f"file://{bare}")
+    from issue_to_patch.config import get_settings
+
+    get_settings.cache_clear()
+
+    result = runner.invoke(
+        app,
+        ["auto", ISSUE_URL, "--repo-source", str(fixture_repo), "--scope", "calculator.py"],
+        # approve / reason / reviewer / role / build=y / push=y / create-pr=n
+        input="approve\n\nalice\ngatekeeper\ny\ny\nn\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "pushed itp/" in result.output
+    # "Create a pull request now?" (the prompt text) is expected; the
+    # outcomes of actually trying are not.
+    assert "pull request opened" not in result.output
+    assert "pull request failed" not in result.output
+
+
+@respx.mock
+def test_auto_reports_a_non_github_push_remote_cleanly_when_creating_a_pr(
+    fixture_repo: Path, auto_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The push target here is a local bare repo (the realistic, offline way
+    to test push itself) — not a github.com URL. Trying to open a PR from
+    it must fail with a clear message, not a crash, since there's no
+    github.com owner/repo to parse out of it."""
+    _mock_github()
+    _patch_fake_llm(monkeypatch)
+
+    bare = auto_env / "bare.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True)
+    monkeypatch.setenv("ITP_PUSH_REMOTE_URL", f"file://{bare}")
+    from issue_to_patch.config import get_settings
+
+    get_settings.cache_clear()
+
+    result = runner.invoke(
+        app,
+        ["auto", ISSUE_URL, "--repo-source", str(fixture_repo), "--scope", "calculator.py"],
+        # approve / reason / reviewer / role / build=y / push=y / create-pr=y /
+        # title=default / body=default / github token
+        input="approve\n\nalice\ngatekeeper\ny\ny\ny\n\n\nfaketoken123\n",
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "pushed itp/" in result.output
+    assert "pull request failed" in result.output
+    assert "not a github.com remote" in result.output
+
+
+@respx.mock
+def test_auto_can_create_a_pull_request_after_pushing(
+    fixture_repo: Path, auto_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The happy path end to end: push to a real-looking github.com fork URL
+    (stubbed — an actual `git push` there would need real network/auth,
+    which SafeGit itself, not this test, is responsible for), then open a
+    real PR against the mocked GitHub API."""
+    _mock_github()
+    _patch_fake_llm(monkeypatch)
+
+    from issue_to_patch.config import get_settings
+    from issue_to_patch.patching.push import PushResult
+
+    # Deliberately NOT named "widget" (the upstream repo name): that would
+    # trip auto's own "are you sure this isn't the upstream repo?" nudge —
+    # a real, separate confirmation prompt this test isn't about.
+    monkeypatch.setenv("ITP_PUSH_REMOTE_URL", "https://github.com/alice/my-fork.git")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "issue_to_patch.patching.push_branch",
+        lambda branch_dir, branch_name, remote: PushResult(
+            remote_display=remote, branch=branch_name, ok=True, detail="pushed"
+        ),
+    )
+
+    pr_route = respx.post(f"{BASE}/repos/{REPO}/pulls").mock(
+        return_value=httpx.Response(
+            201, json={"number": 3, "html_url": f"https://github.com/{REPO}/pull/3"}
+        )
+    )
+
+    result = runner.invoke(
+        app,
+        ["auto", ISSUE_URL, "--repo-source", str(fixture_repo), "--scope", "calculator.py"],
+        # approve / reason / reviewer / role / build=y / push=y / create-pr=y /
+        # title=default / body=default / github token
+        input="approve\n\nalice\ngatekeeper\ny\ny\ny\n\n\nfaketoken123\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "pushed itp/" in result.output
+    assert f"pull request opened: https://github.com/{REPO}/pull/3" in result.output
+    sent = json.loads(pr_route.calls.last.request.content)
+    assert sent["head"] == "alice:itp/" + _run_id_from(result.output)
+    assert sent["base"] == "main"
 
 
 @respx.mock

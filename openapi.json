@@ -362,6 +362,72 @@
         "title": "PatchResponse",
         "type": "object"
       },
+      "PullRequestRequest": {
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Defaults to the upstream default branch",
+            "title": "Base"
+          },
+          "body": {
+            "default": "",
+            "title": "Body",
+            "type": "string"
+          },
+          "fork_remote_url": {
+            "description": "The same remote you pushed the branch to",
+            "title": "Fork Remote Url",
+            "type": "string"
+          },
+          "github_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Needs 'repo' scope; overrides ITP_GITHUB_TOKEN for this call",
+            "title": "Github Token"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fork_remote_url",
+          "title"
+        ],
+        "title": "PullRequestRequest",
+        "type": "object"
+      },
+      "PullRequestResponse": {
+        "properties": {
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "url"
+        ],
+        "title": "PullRequestResponse",
+        "type": "object"
+      },
       "PushRequest": {
         "properties": {
           "remote_url": {
@@ -1329,6 +1395,75 @@
           }
         },
         "summary": "Get Patch",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/runs/{run_id}/pull-request": {
+      "post": {
+        "description": "Opens a real GitHub Pull Request from the already-pushed branch \u2014 a\nseparate, explicit action from push, never implied by it.",
+        "operationId": "create_pull_request_route_runs__run_id__pull_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PullRequestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PullRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Pull Request Route",
         "tags": [
           "runs"
         ]

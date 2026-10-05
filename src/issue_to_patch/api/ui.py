@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse
 from issue_to_patch.api._common import branch_target, load_or_404
 from issue_to_patch.api.deps import CheckpointerDep, GraphDepsDep, StoreDep
 from issue_to_patch.api.diff_render import render_diff_html
+from issue_to_patch.graph.state import InvestigationState
 from issue_to_patch.patching.models import ValidationReport
 from issue_to_patch.persistence.models import Run
 from issue_to_patch.run_states import RunState
@@ -193,6 +194,8 @@ def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerD
             snapshot = state.get("repository")
             branch_dir = branch_target(run_id, snapshot)[0] if snapshot is not None else None
             sections.append(_build_push_section(branch_dir))
+            if branch_dir is not None and branch_dir.exists():
+                sections.append(_pull_request_section(state))
 
     sections.append("</div>")
     return _page(f"Run {run_id}", "\n".join(sections))
@@ -219,6 +222,39 @@ server, if one is set.</small>
   <button id="build-btn" onclick="buildRun()">Build branch</button>
 </div>
 <p id="build-status" role="status" aria-live="polite"></p>
+"""
+
+
+def _pull_request_section(state: InvestigationState) -> str:
+    # Pre-filled, never silently auto-submitted: the title/body are just a
+    # starting point the human can edit before clicking Create — opening a
+    # PR is a real, visible, hard-to-reverse action under their own GitHub
+    # identity, unlike build/push which only ever touch local disk or a
+    # remote they already own.
+    issue_ref = ""
+    summary = ""
+    if (issue := state.get("issue")) is not None:
+        issue_ref = issue.reference
+    if hypotheses := state.get("hypotheses"):
+        summary = hypotheses[0].summary
+    default_title = f"Fix: {summary or issue_ref or 'see description'}"
+    default_body = f"Fixes {issue_ref}.\n\n{summary}".strip() if (issue_ref or summary) else ""
+    return f"""
+<h2>Create a Pull Request</h2>
+<p>Opens a real PR on GitHub, from your fork's branch against the original repository.</p>
+<label for="pr-title">Title</label>
+<input id="pr-title" value="{html.escape(default_title)}">
+<label for="pr-body">Description</label>
+<textarea id="pr-body" rows="4">{html.escape(default_body)}</textarea>
+<label for="github-token">GitHub personal access token (needs 'repo' scope)</label>
+<input id="github-token" type="password"
+       placeholder="leave blank to use the server's ITP_GITHUB_TOKEN, if set">
+<small>Remembered in this browser only — a different credential from both the workspace
+API key above and the push-remote field; this one is yours on github.com.</small>
+<div style="margin-top:0.75rem">
+  <button id="create-pr-btn" onclick="createPullRequest()">Create Pull Request</button>
+</div>
+<p id="pr-status" role="status" aria-live="polite"></p>
 """
 
 

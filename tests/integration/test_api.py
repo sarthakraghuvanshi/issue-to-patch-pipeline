@@ -4,6 +4,7 @@ server, FakeLLM, a real (fixture) indexed repo.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -95,6 +96,7 @@ async def test_openapi_schema_lists_every_endpoint(client: tuple) -> None:
         "/runs/{run_id}/audit",
         "/runs/{run_id}/build",
         "/runs/{run_id}/push",
+        "/runs/{run_id}/pull-request",
         "/users/me",
         "/search",
         "/validate-patch",
@@ -305,6 +307,137 @@ async def test_push_with_a_remote_given_in_the_request_needs_no_server_config(
         check=True,
     ).stdout
     assert f"itp/{run_id}" in ls_remote
+
+
+def _write_repository_json(
+    artifacts_dir: Path, run_id: str, *, full_name: str, default_branch: str = "main"
+) -> None:
+    raw_dir = artifacts_dir / run_id / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "repository.json").write_text(
+        json.dumps(
+            {"_meta": {}, "data": {"full_name": full_name, "default_branch": default_branch}}
+        ),
+        "utf-8",
+    )
+
+
+@respx.mock
+async def test_pull_request_route_opens_a_real_pr_against_the_mocked_github_api(
+    client: tuple, tmp_path: Path
+) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+    _write_repository_json(tmp_path / "artifacts", run_id, full_name="upstream/calc")
+
+    route = respx.post("https://api.github.com/repos/upstream/calc/pulls").mock(
+        return_value=httpx.Response(
+            201, json={"number": 9, "html_url": "https://github.com/upstream/calc/pull/9"}
+        )
+    )
+    response = await async_client.post(
+        f"/runs/{run_id}/pull-request",
+        json={
+            "fork_remote_url": "https://github.com/alice/calc.git",
+            "title": "Fix the bug",
+            "body": "Closes the issue",
+            "github_token": "tok",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {"number": 9, "url": "https://github.com/upstream/calc/pull/9"}
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["head"] == "alice:itp/" + run_id
+    assert sent["base"] == "main"
+
+
+async def test_pull_request_before_build_is_a_conflict(client: tuple) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+
+    response = await async_client.post(
+        f"/runs/{run_id}/pull-request",
+        json={"fork_remote_url": "https://github.com/alice/calc.git", "title": "t"},
+    )
+    assert response.status_code == 409
+
+
+async def test_pull_request_without_a_token_is_a_bad_request(client: tuple, tmp_path: Path) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+    _write_repository_json(tmp_path / "artifacts", run_id, full_name="upstream/calc")
+
+    response = await async_client.post(
+        f"/runs/{run_id}/pull-request",
+        json={"fork_remote_url": "https://github.com/alice/calc.git", "title": "t"},
+    )
+    assert response.status_code == 400
+    assert "ITP_GITHUB_TOKEN" in response.text
+
+
+@respx.mock
+async def test_pull_request_surfaces_githubs_real_error(client: tuple, tmp_path: Path) -> None:
+    async_client, snap_dir, llm, _store = client
+    _queue_happy_path(llm)
+    started = await async_client.post(
+        "/runs",
+        json={
+            "issue": "add() returns the wrong result",
+            "snapshot": str(snap_dir),
+            "scope": ["calculator.py"],
+        },
+    )
+    run_id = started.json()["run_id"]
+    await async_client.post(f"/runs/{run_id}/approve", json={"decision": "approve"})
+    await async_client.post(f"/runs/{run_id}/build")
+    _write_repository_json(tmp_path / "artifacts", run_id, full_name="upstream/calc")
+
+    respx.post("https://api.github.com/repos/upstream/calc/pulls").mock(
+        return_value=httpx.Response(422, json={"message": "A pull request already exists"})
+    )
+    response = await async_client.post(
+        f"/runs/{run_id}/pull-request",
+        json={
+            "fork_remote_url": "https://github.com/alice/calc.git",
+            "title": "t",
+            "github_token": "tok",
+        },
+    )
+    assert response.status_code == 400
+    assert "already exists" in response.text
 
 
 async def test_audit_endpoint_404s_for_an_unknown_run(client: tuple) -> None:

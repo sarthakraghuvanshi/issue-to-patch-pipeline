@@ -6,6 +6,7 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
 `PATCH_VALIDATED`, `PATCH_REQUIRES_HUMAN_REVIEW`, `PATCH_REJECTED`, or
 `INVESTIGATION_INCONCLUSIVE` — it never silently claims success.
 
+- **New to the project?** [How it works, in simple language](docs/project-guide.md)
 - **What / why:** [RAG_LEARNING_PLAN.md](RAG_LEARNING_PLAN.md)
 - **How / order / deploy:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
 

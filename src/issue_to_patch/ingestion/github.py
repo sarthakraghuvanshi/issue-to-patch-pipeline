@@ -79,19 +79,33 @@ class GitHubClient:
         response = await self._request("GET", path, params=params)
         return response.json()
 
+    async def post_json(self, path: str, *, json: dict[str, Any]) -> Any:
+        response = await self._request("POST", path, json=json)
+        return response.json()
+
     async def _request(
-        self, method: str, path: str, *, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
     ) -> httpx.Response:
         cache_key = self._cache_key(path, params)
         attempt = 0
         while True:
             attempt += 1
             headers: dict[str, str] = {}
-            cached = self._etags.get(cache_key)
+            # ETag caching only ever makes sense for a safe, idempotent GET —
+            # never attach a conditional header to a POST, and never cache
+            # its response (a create call isn't repeatable the way a GET is).
+            cached = self._etags.get(cache_key) if method == "GET" else None
             if cached is not None:
                 headers["If-None-Match"] = cached.etag
 
-            response = await self._client.request(method, path, params=params, headers=headers)
+            response = await self._client.request(
+                method, path, params=params, json=json, headers=headers
+            )
             self.call_log.append(
                 {"method": method, "path": path, "status": response.status_code, "attempt": attempt}
             )
@@ -138,7 +152,7 @@ class GitHubClient:
                 )
 
             etag = response.headers.get("ETag")
-            if etag:
+            if method == "GET" and etag:
                 self._etags[cache_key] = _CacheEntry(etag=etag, payload=response.json())
             return response
 

@@ -7,7 +7,12 @@ from pathlib import Path
 
 from issue_to_patch.ingestion.snapshot import create_snapshot
 from issue_to_patch.patching import EditPlan, FileEdit, generate_patch, materialize_branch
-from issue_to_patch.patching.push import PushResult, _redact_remote, push_branch
+from issue_to_patch.patching.push import (
+    PushResult,
+    _redact_remote,
+    parse_github_owner_repo,
+    push_branch,
+)
 
 
 def test_redact_remote_strips_userinfo_from_https() -> None:
@@ -16,6 +21,31 @@ def test_redact_remote_strips_userinfo_from_https() -> None:
     assert "ghp_abcXYZ0123456789" not in redacted
     assert "@" not in redacted  # no credential delimiter left at all
     assert redacted == "https://github.com/user/fork.git"
+
+
+def test_parse_github_owner_repo_from_https() -> None:
+    assert parse_github_owner_repo("https://github.com/alice/fork.git") == ("alice", "fork")
+    assert parse_github_owner_repo("https://github.com/alice/fork") == ("alice", "fork")
+
+
+def test_parse_github_owner_repo_from_scp_style() -> None:
+    assert parse_github_owner_repo("git@github.com:alice/fork.git") == ("alice", "fork")
+
+
+def test_parse_github_owner_repo_strips_embedded_credentials() -> None:
+    url = "https://ghp_abc123@github.com/alice/fork.git"
+    assert parse_github_owner_repo(url) == ("alice", "fork")
+
+
+def test_parse_github_owner_repo_rejects_a_non_github_host() -> None:
+    assert parse_github_owner_repo("https://gitlab.com/alice/fork.git") is None
+    assert parse_github_owner_repo("git@gitlab.com:alice/fork.git") is None
+
+
+def test_parse_github_owner_repo_rejects_a_malformed_path() -> None:
+    assert parse_github_owner_repo("https://github.com/alice") is None
+    assert parse_github_owner_repo("https://github.com/alice/fork/extra") is None
+    assert parse_github_owner_repo("not-a-url-at-all") is None
 
 
 def test_redact_remote_leaves_scp_syntax_alone() -> None:

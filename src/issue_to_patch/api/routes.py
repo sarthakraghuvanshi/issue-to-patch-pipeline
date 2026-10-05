@@ -31,6 +31,8 @@ from issue_to_patch.api.schemas import (
     AutoRunRequest,
     BuildResponse,
     PatchResponse,
+    PullRequestRequest,
+    PullRequestResponse,
     PushRequest,
     PushResponse,
     RetrievalHitOut,
@@ -47,7 +49,7 @@ from issue_to_patch.api.schemas import (
 )
 from issue_to_patch.auto_run import auto_index, auto_ingest, auto_investigate
 from issue_to_patch.graph import HumanDecision, resume_investigation, start_investigation
-from issue_to_patch.ingestion.errors import IngestionError, RepositoryNotFound
+from issue_to_patch.ingestion.errors import GitHubAPIError, IngestionError, RepositoryNotFound
 from issue_to_patch.ingestion.git_ops import SafeGit
 from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.ingestion.snapshot import load_snapshot
@@ -55,6 +57,7 @@ from issue_to_patch.patching import EditApplicationError, materialize_branch, pu
 from issue_to_patch.patching.models import PatchArtifact
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
+from issue_to_patch.pull_request import ForkRemoteNotGitHub, create_pull_request
 from issue_to_patch.retrieval import RetrievalService, SearchFilters
 from issue_to_patch.run_states import RunState
 
@@ -264,6 +267,49 @@ def push_run(
     return PushResponse(
         run_id=run_id, ok=result.ok, remote_display=result.remote_display, detail=result.detail
     )
+
+
+@runs_router.post("/{run_id}/pull-request", response_model=PullRequestResponse)
+async def create_pull_request_route(
+    run_id: str,
+    body: PullRequestRequest,
+    deps: GraphDepsDep,
+    checkpointer: CheckpointerDep,
+    settings: SettingsDep,
+) -> PullRequestResponse:
+    """Opens a real GitHub Pull Request from the already-pushed branch — a
+    separate, explicit action from push, never implied by it."""
+    handle = _load_or_404(run_id, deps, checkpointer)
+    snapshot = handle.state.get("repository")
+    if snapshot is None:
+        raise HTTPException(404, f"no such run: {run_id}")
+    branch_dir, branch_name = _branch_target(run_id, snapshot)
+    if not branch_dir.exists():
+        raise HTTPException(409, "build the branch before creating a pull request")
+    token = body.github_token or (
+        settings.github_token.get_secret_value() if settings.github_token else None
+    )
+    if token is None:
+        raise HTTPException(
+            400,
+            "No GitHub token given — pass github_token (needs 'repo' scope), "
+            "or set ITP_GITHUB_TOKEN on the server",
+        )
+    try:
+        result = await create_pull_request(
+            run_dir=settings.artifacts_dir / run_id,
+            branch_name=branch_name,
+            fork_remote_url=body.fork_remote_url,
+            title=body.title,
+            body=body.body,
+            base=body.base,
+            token=token,
+        )
+    except ForkRemoteNotGitHub as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except GitHubAPIError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return PullRequestResponse(number=result.number, url=result.url)
 
 
 @runs_router.get("/{run_id}/audit", response_model=AuditTrail)

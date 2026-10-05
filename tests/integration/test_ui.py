@@ -194,6 +194,13 @@ async def test_run_detail_page_shows_push_once_already_built(client: tuple) -> N
     # the field to type a push remote directly, no server config required
     assert 'id="push-remote-url"' in page.text
     assert "remote_url: remoteUrl" in page.text
+    # the "Create a Pull Request" section, present once a branch is built —
+    # it never requires a push to have actually happened server-side
+    # (that's never tracked), only that there's a branch to open a PR from.
+    assert 'id="create-pr-btn"' in page.text
+    assert 'id="pr-title"' in page.text
+    assert 'id="github-token"' in page.text
+    assert "fork_remote_url" in page.text
 
 
 _AUTO_BASE = "https://api.github.com"
