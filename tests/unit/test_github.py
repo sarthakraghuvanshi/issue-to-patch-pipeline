@@ -194,9 +194,7 @@ async def test_post_json_response_is_never_cached_as_an_etag_entry() -> None:
             201, json={"number": 1, "html_url": "https://x/pull/1"}, headers={"ETag": '"abc"'}
         )
     )
-    get_route = respx.get(f"{BASE}/repos/o/r/pulls").mock(
-        return_value=httpx.Response(200, json=[])
-    )
+    get_route = respx.get(f"{BASE}/repos/o/r/pulls").mock(return_value=httpx.Response(200, json=[]))
     client = await _client()
     await client.post_json("/repos/o/r/pulls", json={"title": "t"})
     await client.get_json("/repos/o/r/pulls")
