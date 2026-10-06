@@ -728,18 +728,34 @@ async def test_auto_run_ingests_indexes_and_investigates_from_a_bare_url(
             "scope": ["calculator.py"],
         },
     )
-    assert response.status_code == 201, response.text
-    body = response.json()
+    assert response.status_code == 202, response.text
+    run_id = response.json()["run_id"]
+    # The background task has already completed by the time this POST
+    # returns (httpx.ASGITransport awaits the whole app call, including
+    # Starlette's post-response BackgroundTasks, before building the
+    # response) - so the real result is already there to fetch.
+    fetched = await async_client.get(f"/runs/{run_id}")
+    body = fetched.json()
     assert body["status"] == "AWAITING_HUMAN_REVIEW"
     assert body["hypothesis"]["summary"] == "subtracts instead of adds"
-    assert store.get_run_state(body["run_id"]) is not None
+    assert store.get_run_state(run_id) is not None
 
 
 @respx.mock
 async def test_auto_run_with_a_bad_issue_reference_is_a_bad_request(client: tuple) -> None:
+    """A bad issue_url can no longer be a synchronous 400 (the 202 has
+    already gone out before auto_ingest even runs) - it surfaces as a
+    failed pending run instead."""
+    from issue_to_patch.api import pending_runs
+
     async_client, _snap_dir, _llm, _store = client
     response = await async_client.post("/runs/auto", json={"issue_url": "not a real reference"})
-    assert response.status_code == 400
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    pending = pending_runs.get(run_id)
+    assert pending is not None
+    assert pending.stage == "failed"
+    assert pending.error
 
 
 async def test_start_run_with_an_unindexed_snapshot_is_a_bad_request(

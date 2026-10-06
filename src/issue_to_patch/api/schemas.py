@@ -52,6 +52,15 @@ class AutoRunRequest(BaseModel):
     max_lines: int = Field(default=200, description="Max lines before a big class is split")
 
 
+class AutoRunAcceptedResponse(BaseModel):
+    """What ``POST /runs/auto`` returns immediately — the run has been
+    scheduled, not completed. Poll ``GET /runs/{run_id}`` (JSON, 404 until
+    the first checkpoint exists) or ``GET /ui/runs/{run_id}`` (HTML, shows
+    progress in the meantime) for the eventual result."""
+
+    run_id: str
+
+
 class RunStateResponse(BaseModel):
     run_id: str
     issue_ref: str | None = None

@@ -19,14 +19,20 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from issue_to_patch.api._common import branch_target, load_or_404
-from issue_to_patch.api.deps import CheckpointerDep, GraphDepsDep, StoreDep
+from issue_to_patch.api import pending_runs
+from issue_to_patch.api._common import branch_target
+from issue_to_patch.api.deps import CheckpointerDep, GraphDepsDep, SettingsDep, StoreDep
 from issue_to_patch.api.diff_render import render_diff_html
+from issue_to_patch.graph import UnknownRun, load_investigation
 from issue_to_patch.graph.state import InvestigationState
+from issue_to_patch.ingestion import GitHubAPIError, GitHubClient, GitHubNotFound
+from issue_to_patch.ingestion.fetch import list_open_issues
+from issue_to_patch.ingestion.github_models import GitHubIssue
 from issue_to_patch.patching.models import ValidationReport
+from issue_to_patch.patching.push import parse_github_owner_repo
 from issue_to_patch.persistence.models import Run
 from issue_to_patch.run_states import RunState
 
@@ -41,11 +47,12 @@ _PAGE_STYLE = "<style>" + Path(__file__).with_name("ui.css").read_text() + "</st
 _PAGE_SCRIPT = "<script>" + Path(__file__).with_name("ui.js").read_text() + "</script>"
 
 
-def _page(title: str, body: str) -> HTMLResponse:
+def _page(title: str, body: str, *, extra_head: str = "") -> HTMLResponse:
     return HTMLResponse(
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        f"<title>{html.escape(title)} · Issue-to-Patch</title>{_PAGE_STYLE}{_PAGE_SCRIPT}</head>"
+        f"<title>{html.escape(title)} · Issue-to-Patch</title>{_PAGE_STYLE}{_PAGE_SCRIPT}"
+        f"{extra_head}</head>"
         f"<body>{_SHELL}<main id='main'><header class='topbar'>"
         "<span>Workspace <span class='separator'>/</span> Investigations</span>"
         "<span class='workspace-label'>ISSUE-TO-PATCH</span></header>"
@@ -107,6 +114,7 @@ def list_runs_page(store: StoreDep) -> HTMLResponse:
         f"<div><span>Total run cost</span><strong>${sum(r.cost_usd for r in runs):.4f}"
         "<i>$</i></strong></div></div>"
         f"{_START_RUN_FORM}"
+        f"{_REPO_BROWSE_FORM}"
         "<section class='panel history'><div class='section-heading'><div><h2>Run history "
         f"<span class='count'>{len(runs)}</span></h2>"
         "<p>Every investigation, in one place.</p></div>"
@@ -138,21 +146,117 @@ def list_runs_page(store: StoreDep) -> HTMLResponse:
 
 
 _START_RUN_FORM = Path(__file__).with_name("ui_start.html").read_text()
+_REPO_BROWSE_FORM = Path(__file__).with_name("ui_repo_browse.html").read_text()
+
+
+@ui_router.get("/repos/issues", response_class=HTMLResponse, response_model=None)
+def resolve_repo_issues(repo: str) -> HTMLResponse | RedirectResponse:
+    """The repo-browse form's submit target: parses the pasted text with the
+    same :func:`parse_github_owner_repo` the push feature already uses (no
+    second parser), then redirects to the canonical per-repo page. A bad
+    URL gets a friendly inline message on a normal 200, not a 400/404 — a
+    mistyped box of text reads more like a no-results search than a broken
+    link."""
+    parsed = parse_github_owner_repo(repo.strip())
+    if parsed is None:
+        body = (
+            "<a class='back-link' href='/ui/runs'>← All investigations</a>"
+            "<div class='page-heading'><div><p class='eyebrow'>BROWSE A REPOSITORY</p>"
+            "<h1>Could not read that repository URL</h1>"
+            f"<p>{html.escape(repo)} doesn't look like a github.com repository URL. "
+            "Try something like https://github.com/owner/repo.</p></div></div>"
+        )
+        return _page("Browse a repository", body)
+    owner, name = parsed
+    return RedirectResponse(f"/ui/repos/{owner}/{name}/issues", status_code=303)
+
+
+@ui_router.get("/repos/{owner}/{repo}/issues", response_class=HTMLResponse)
+async def list_repo_issues_page(owner: str, repo: str, settings: SettingsDep) -> HTMLResponse:
+    full_name = f"{owner}/{repo}"
+    token = settings.github_token.get_secret_value() if settings.github_token else None
+    try:
+        async with GitHubClient(token=token, base_url=settings.github_api_base) as client:
+            issues = await list_open_issues(client, full_name)
+    except GitHubNotFound:
+        return _page(
+            f"{full_name} issues",
+            _repo_issues_error(full_name, "No such repository, or it's private."),
+        )
+    except GitHubAPIError as exc:
+        return _page(f"{full_name} issues", _repo_issues_error(full_name, str(exc)))
+
+    rows = "".join(_issue_row(issue) for issue in issues)
+    body = (
+        "<a class='back-link' href='/ui/runs'>← All investigations</a>"
+        "<div class='page-heading'><div><p class='eyebrow'>BROWSE A REPOSITORY</p>"
+        f"<h1>{html.escape(full_name)}</h1>"
+        "<p>Open issues, most recently updated first. Pick one to investigate.</p></div></div>"
+        "<section class='panel history'><div class='section-heading'><div>"
+        f"<h2>Open issues <span class='count'>{len(issues)}</span></h2></div></div>"
+        "<p id='repo-issues-status' class='feedback' role='status' aria-live='polite'></p>"
+    )
+    if issues:
+        body += (
+            "<div class='table-scroll'><table><thead><tr><th>Issue</th><th>Labels</th>"
+            "<th>Updated</th><th><span class='sr-only'>Run</span></th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+    else:
+        body += (
+            "<div class='empty-state'><div class='empty-icon'>⌘</div>"
+            "<h3>No open issues</h3><p>This repository has no open issues right now.</p></div>"
+        )
+    body += "</section>"
+    return _page(f"{full_name} issues", body)
+
+
+def _repo_issues_error(full_name: str, detail: str) -> str:
+    return (
+        "<a class='back-link' href='/ui/runs'>← All investigations</a>"
+        "<div class='page-heading'><div><p class='eyebrow'>BROWSE A REPOSITORY</p>"
+        f"<h1>Could not list issues for {html.escape(full_name)}</h1>"
+        f"<p>{html.escape(detail)}</p></div></div>"
+    )
+
+
+def _issue_row(issue: GitHubIssue) -> str:
+    labels = "".join(
+        f"<span class='badge neutral'>{html.escape(label)}</span>" for label in issue.labels
+    )
+    updated = issue.updated_at.strftime("%b %d, %Y") if issue.updated_at else ""
+    return (
+        "<tr><td><a class='run-link' href='" + html.escape(issue.html_url) + "' "
+        "target='_blank' rel='noopener noreferrer'>"
+        f"#{issue.number} {html.escape(issue.title)}</a>"
+        f"<small class='run-id'>by {html.escape(issue.author)}</small></td>"
+        f"<td>{labels}</td><td><time>{html.escape(updated)}</time></td>"
+        "<td><button class='button secondary run-issue-btn' "
+        f"data-issue-url='{html.escape(issue.html_url)}'>Run →</button></td></tr>"
+    )
 
 
 @ui_router.get("/runs/{run_id}", response_class=HTMLResponse)
 def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) -> HTMLResponse:
-    handle = load_or_404(run_id, deps, checkpointer)
+    try:
+        handle = load_investigation(run_id, deps, checkpointer=checkpointer)
+    except UnknownRun as exc:
+        pending = pending_runs.get(run_id)
+        if pending is None:
+            raise HTTPException(404, f"no such run: {run_id}") from exc
+        return _pending_run_page(run_id, pending)
     state = handle.state
 
     sections = [
         "<a class='back-link' href='/ui/runs'>← All investigations</a>"
         "<div class='page-heading'><div><p class='eyebrow'>INVESTIGATION DETAILS</p>"
         f"<h1>Review investigation</h1><p class='run-id'>{html.escape(run_id)}</p></div></div>"
-        "<div class='panel detail-panel'>"
+        "<div class='detail-panel'>"
     ]
     if (issue := state.get("issue")) is not None:
-        sections.append(f"<p><b>Issue:</b> {html.escape(issue.reference)}</p>")
+        sections.append(
+            f"<div class='issue-reference'><span>ISSUE</span>{html.escape(issue.reference)}</div>"
+        )
 
     if hypotheses := state.get("hypotheses"):
         top = hypotheses[0]
@@ -162,15 +266,16 @@ def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerD
             for loc in top.cites
         )
         sections.append(
-            "<h2>Diagnosis</h2>"
+            "<section class='review-section'><h2>Diagnosis</h2>"
             f"<p>{html.escape(top.summary)} "
             f"<i>(confidence={top.confidence:.2f})</i></p>"
-            f"<ul>{cites}</ul>"
+            f"<ul>{cites}</ul></section>"
         )
 
     if (patch := state.get("candidate_patch")) is not None:
-        sections.append("<h2>Diff</h2>")
+        sections.append("<section class='review-section'><h2>Code changes</h2>")
         sections.append(render_diff_html(patch.patch_text))
+        sections.append("</section>")
 
     validation: ValidationReport | None = state.get("validation")
     if validation is not None:
@@ -180,16 +285,21 @@ def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerD
             for c in validation.checks
         )
         sections.append(
-            "<h2>Validation</h2>"
-            f"<table><tr><th>status</th><th>check</th><th>detail</th></tr>{checks}</table>"
+            "<section class='review-section'><h2>Validation</h2><div class='table-scroll'>"
+            f"<table><tr><th>Status</th><th>Check</th><th>Detail</th></tr>{checks}</table>"
+            "</div></section>"
         )
 
     if handle.awaiting_human:
-        sections.append(_decision_form())
+        sections.append(
+            "<section class='review-section review-form'>" + _decision_form() + "</section>"
+        )
     else:
         final_state = state.get("final_state")
         status = final_state.value if final_state is not None else "IN_PROGRESS"
-        sections.append(f"<h2>Status</h2><p><b>{html.escape(status)}</b></p>")
+        sections.append(
+            f"<section class='review-section outcome'><h2>Outcome</h2>{_badge(status)}</section>"
+        )
         if final_state is RunState.PATCH_VALIDATED:
             snapshot = state.get("repository")
             branch_dir = branch_target(run_id, snapshot)[0] if snapshot is not None else None
@@ -253,6 +363,36 @@ Uses the GitHub token entered above, if any.</small>
 <p id="build-status" class="delivery-status" role="status" aria-live="polite"></p>
 </div></section>
 """
+
+
+_STAGE_LABELS = {
+    "ingesting": "Fetching the issue and repository…",
+    "indexing": "Indexing the codebase…",
+    "investigating": "Running the investigation…",
+}
+
+
+def _pending_run_page(run_id: str, pending: pending_runs.PendingAutoRun) -> HTMLResponse:
+    heading = (
+        "<a class='back-link' href='/ui/runs'>← All investigations</a>"
+        "<div class='page-heading'><div><p class='eyebrow'>INVESTIGATION DETAILS</p>"
+    )
+    if pending.stage == "failed":
+        body = (
+            heading + "<h1>Investigation failed</h1>"
+            f"<p class='run-id'>{html.escape(run_id)}</p></div></div>"
+            "<div class='detail-panel'><h2>Could not complete this investigation</h2>"
+            f"<p>{html.escape(pending.error or 'Unknown error')}</p></div>"
+        )
+        return _page(f"Run {run_id}", body)
+    label = _STAGE_LABELS.get(pending.stage, "Working…")
+    body = (
+        heading + f"<h1>{html.escape(label)}</h1>"
+        f"<p class='run-id'>{html.escape(run_id)}</p></div></div>"
+        "<div class='detail-panel'><p>This page updates automatically every few seconds — "
+        "no need to refresh it yourself.</p></div>"
+    )
+    return _page(f"Run {run_id}", body, extra_head='<meta http-equiv="refresh" content="3">')
 
 
 def _pull_request_section(state: InvestigationState) -> str:

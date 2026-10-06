@@ -134,6 +134,20 @@
         "title": "AuditTrail",
         "type": "object"
       },
+      "AutoRunAcceptedResponse": {
+        "description": "What ``POST /runs/auto`` returns immediately \u2014 the run has been\nscheduled, not completed. Poll ``GET /runs/{run_id}`` (JSON, 404 until\nthe first checkpoint exists) or ``GET /ui/runs/{run_id}`` (HTML, shows\nprogress in the meantime) for the eventual result.",
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "title": "AutoRunAcceptedResponse",
+        "type": "object"
+      },
       "AutoRunRequest": {
         "description": "Like StartRunRequest, but does the ingest+index itself from a bare\nissue URL instead of requiring an already-prepared snapshot.",
         "properties": {
@@ -1052,7 +1066,7 @@
     },
     "/runs/auto": {
       "post": {
-        "description": "Like ``POST /runs``, but does the ingest+index itself from a bare\nissue URL \u2014 the same ``auto_ingest``/``auto_index``/``auto_investigate``\nthe `auto` CLI command calls, so the two can never drift.",
+        "description": "Like ``POST /runs``, but does the ingest+index itself from a bare\nissue URL, and does all of it \u2014 ingest, index, investigate \u2014 in a\nbackground task so this call returns immediately with a run_id to poll\n(``GET /ui/runs/{run_id}`` shows progress), instead of blocking the one\nevent loop for the full 1-2 minutes every other request would then\nshare. A bad issue_url (or any other pipeline failure) can no longer be\nreported as a synchronous 400 here \u2014 it surfaces only via the run's own\npage or ``pending_runs.get(run_id)``, since by the time ingest actually\nruns, this response has already been sent.",
         "operationId": "start_auto_run_runs_auto_post",
         "parameters": [
           {
@@ -1083,11 +1097,11 @@
           "required": true
         },
         "responses": {
-          "201": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunStateResponse"
+                  "$ref": "#/components/schemas/AutoRunAcceptedResponse"
                 }
               }
             },

@@ -265,7 +265,7 @@ async def test_a_run_started_via_the_auto_route_is_visible_in_the_ui(
             "scope": ["calculator.py"],
         },
     )
-    assert started.status_code == 201, started.text
+    assert started.status_code == 202, started.text
     run_id = started.json()["run_id"]
 
     list_page = await async_client.get("/ui/runs")
@@ -281,6 +281,39 @@ async def test_run_detail_page_404s_for_an_unknown_run(client: tuple) -> None:
     async_client, _snap_dir, _llm, _store = client
     response = await async_client.get("/ui/runs/does-not-exist")
     assert response.status_code == 404
+
+
+async def test_run_detail_page_shows_a_waiting_page_while_pending(client: tuple) -> None:
+    """The gap this closes: ingest+index can take tens of seconds before
+    the first LangGraph checkpoint exists - a pending run_id must show a
+    friendly waiting page here, not a 404, and must auto-refresh so the
+    human never has to manually reload."""
+    from issue_to_patch.api import pending_runs
+
+    async_client, _snap_dir, _llm, _store = client
+    pending_runs.mark_stage("pending-run-1", "indexing")
+    try:
+        response = await async_client.get("/ui/runs/pending-run-1")
+        assert response.status_code == 200
+        assert "Indexing the codebase" in response.text
+        assert '<meta http-equiv="refresh" content="3">' in response.text
+    finally:
+        pending_runs.clear("pending-run-1")
+
+
+async def test_run_detail_page_shows_the_error_for_a_failed_pending_run(client: tuple) -> None:
+    from issue_to_patch.api import pending_runs
+
+    async_client, _snap_dir, _llm, _store = client
+    pending_runs.mark_failed("pending-run-2", "not a github.com URL: bogus")
+    try:
+        response = await async_client.get("/ui/runs/pending-run-2")
+        assert response.status_code == 200
+        assert "Investigation failed" in response.text
+        assert "not a github.com URL: bogus" in response.text
+        assert "meta http-equiv=" not in response.text  # a failure stops auto-refreshing
+    finally:
+        pending_runs.clear("pending-run-2")
 
 
 async def test_diff_with_angle_brackets_renders_without_breaking_the_page(
@@ -314,3 +347,92 @@ async def test_diff_with_angle_brackets_renders_without_breaking_the_page(
     assert "a &lt; b" in page.text
     assert "a &amp; b" in page.text
     assert "a < b" not in page.text  # never raw/unescaped in the HTML
+
+
+async def test_runs_list_page_has_the_repo_browse_form(client: tuple) -> None:
+    async_client, *_ = client
+    page = await async_client.get("/ui/runs")
+    assert 'id="repo-url"' in page.text
+    assert 'action="/ui/repos/issues"' in page.text
+
+
+async def test_resolve_repo_issues_redirects_to_the_canonical_path(client: tuple) -> None:
+    async_client, *_ = client
+    resp = await async_client.get(
+        "/ui/repos/issues",
+        params={"repo": "https://github.com/acme/widget"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/ui/repos/acme/widget/issues"
+
+
+async def test_resolve_repo_issues_also_accepts_an_scp_style_url(client: tuple) -> None:
+    async_client, *_ = client
+    resp = await async_client.get(
+        "/ui/repos/issues",
+        params={"repo": "git@github.com:acme/widget.git"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/ui/repos/acme/widget/issues"
+
+
+async def test_resolve_repo_issues_shows_a_friendly_error_for_a_non_github_url(
+    client: tuple,
+) -> None:
+    async_client, *_ = client
+    resp = await async_client.get("/ui/repos/issues", params={"repo": "not a url"})
+    assert resp.status_code == 200
+    assert "doesn't look like a github.com repository URL" in resp.text
+
+
+@respx.mock
+async def test_repo_issues_page_lists_open_issues_and_filters_prs(client: tuple) -> None:
+    async_client, *_ = client
+    respx.get("https://api.github.com/repos/acme/widget/issues").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"number": 9, "title": "a pull request", "pull_request": {}, "state": "open"},
+                {
+                    "number": 5,
+                    "title": "null pointer on save",
+                    "state": "open",
+                    "labels": [{"name": "bug"}],
+                    "user": {"login": "dev"},
+                    "html_url": "https://github.com/acme/widget/issues/5",
+                },
+            ],
+        )
+    )
+    page = await async_client.get("/ui/repos/acme/widget/issues")
+    assert page.status_code == 200
+    assert "null pointer on save" in page.text
+    assert "a pull request" not in page.text
+    assert "data-issue-url='https://github.com/acme/widget/issues/5'" in page.text
+    assert "run-issue-btn" in page.text
+
+
+@respx.mock
+async def test_repo_issues_page_shows_an_empty_state_for_no_open_issues(client: tuple) -> None:
+    async_client, *_ = client
+    respx.get("https://api.github.com/repos/acme/quiet/issues").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    page = await async_client.get("/ui/repos/acme/quiet/issues")
+    assert page.status_code == 200
+    assert "No open issues" in page.text
+
+
+@respx.mock
+async def test_repo_issues_page_shows_a_friendly_error_for_a_nonexistent_repo(
+    client: tuple,
+) -> None:
+    async_client, *_ = client
+    respx.get("https://api.github.com/repos/acme/ghost/issues").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    page = await async_client.get("/ui/repos/acme/ghost/issues")
+    assert page.status_code == 200
+    assert "Could not list issues" in page.text

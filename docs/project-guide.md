@@ -85,13 +85,13 @@ The server divides supported source files into smaller pieces and saves them in 
 
 The workflow plans searches, gathers evidence, suggests a cause, and attempts to create a patch. The next chapters explain these steps.
 
-### E. It responds when the investigation pauses or finishes
+### E. It responds right away, and does the work in the background
 
-The endpoint performs the work within the request. It does not immediately hand the job to a separate background worker.
+`POST /runs/auto` hands the real work (fetch, index, investigate) to a background task and responds immediately with just the new run's ID — it does not make the browser wait for any of it. The browser navigates to the run's review page right away.
 
-This explains the waiting message. The browser does not currently receive a live stream of every internal step. Once the request succeeds, it navigates to the run’s review page.
+That review page does not yet have a real investigation behind it the moment you land on it — fetching and indexing can themselves take tens of seconds. Until the first real result exists, the page shows a short "investigating…" message and refreshes itself automatically every few seconds, with no need to reload by hand. Once the investigation reaches a real diagnosis (or fails), the page simply shows that instead.
 
-**Follow this in code:** [browser actions](../src/issue_to_patch/api/ui.js), [API routes](../src/issue_to_patch/api/routes.py), and [shared automatic workflow](../src/issue_to_patch/auto_run.py).
+**Follow this in code:** [browser actions](../src/issue_to_patch/api/ui.js), [API routes](../src/issue_to_patch/api/routes.py), [shared automatic workflow](../src/issue_to_patch/auto_run.py), and [the pending-run tracker](../src/issue_to_patch/api/pending_runs.py) that the review page checks while nothing has started yet.
 
 ## 3. One small example
 

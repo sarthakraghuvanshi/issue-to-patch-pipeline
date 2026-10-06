@@ -96,20 +96,13 @@ async function decide(action) {
   }
 }
 
-async function startAuto() {
-  var issueUrl = document.getElementById('new-issue-url').value.trim();
-  var scopeRaw = document.getElementById('new-scope').value.trim();
-  var statusEl = document.getElementById('new-run-status');
-  var btn = document.getElementById('start-auto-btn');
-  if (!document.getElementById('investigation-form').reportValidity()) return;
-  var body = {issue_url: issueUrl};
-  if (scopeRaw) {
-    body.scope = scopeRaw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-  }
+async function runAutoInvestigation(issueUrl, scope, statusEl, btn, busyLabel, idleLabel) {
   btn.disabled = true;
-  btn.textContent = 'Investigating…';
+  btn.textContent = busyLabel;
   statusEl.className = 'feedback working';
   statusEl.textContent = 'Investigation in progress. This usually takes a minute or two. Keep this page open.';
+  var body = {issue_url: issueUrl};
+  if (scope && scope.length) body.scope = scope;
   try {
     var resp = await fetch('/runs/auto', {
       method: 'POST', headers: apiKeyHeader(), body: JSON.stringify(body)
@@ -119,17 +112,41 @@ async function startAuto() {
       await swapPage('/ui/runs/' + result.run_id);
     } else {
       statusEl.textContent = 'failed (' + resp.status + '): ' + await resp.text();
-      btn.disabled = false;
-      btn.textContent = 'Start investigation →';
       statusEl.className = 'feedback error';
+      btn.disabled = false;
+      btn.textContent = idleLabel;
     }
   } catch (e) {
     statusEl.textContent = 'error: ' + e;
-    btn.disabled = false;
-    btn.textContent = 'Start investigation →';
     statusEl.className = 'feedback error';
+    btn.disabled = false;
+    btn.textContent = idleLabel;
   }
 }
+
+async function startAuto() {
+  var issueUrl = document.getElementById('new-issue-url').value.trim();
+  var scopeRaw = document.getElementById('new-scope').value.trim();
+  if (!document.getElementById('investigation-form').reportValidity()) return;
+  var scope = scopeRaw ? scopeRaw.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+  await runAutoInvestigation(
+    issueUrl, scope,
+    document.getElementById('new-run-status'), document.getElementById('start-auto-btn'),
+    'Investigating…', 'Start investigation →'
+  );
+}
+
+// Delegated (not bound per-row): the issue list is rendered server-side and
+// re-fetched on every navigation, so a direct listener would need to be
+// re-attached each time — this one, registered once here in <head>, keeps
+// working across every swapPage() without that bookkeeping.
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest('.run-issue-btn');
+  if (!btn) return;
+  var statusEl = document.getElementById('repo-issues-status');
+  if (!statusEl) return;
+  runAutoInvestigation(btn.dataset.issueUrl, [], statusEl, btn, 'Starting…', btn.textContent);
+});
 
 async function buildRun() {
   var match = location.pathname.match(/\/ui\/runs\/([^/]+)/);

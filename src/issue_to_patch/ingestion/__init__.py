@@ -15,6 +15,7 @@ from issue_to_patch.ingestion.fetch import (
     fetch_issue,
     fetch_issue_conversation,
     fetch_repository_metadata,
+    list_open_issues,
 )
 from issue_to_patch.ingestion.git_ops import GitInvocation, SafeGit
 from issue_to_patch.ingestion.github import GitHubClient
@@ -68,6 +69,7 @@ __all__ = [
     "fetch_issue_conversation",
     "fetch_repository_metadata",
     "ingest_issue",
+    "list_open_issues",
     "load_snapshot",
     "normalize_issue",
     "redact_secrets",

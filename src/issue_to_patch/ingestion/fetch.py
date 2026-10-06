@@ -37,6 +37,29 @@ async def fetch_repository_metadata(client: GitHubClient, repo: str) -> Reposito
     return RepositoryMetadata.from_api(payload)
 
 
+async def list_open_issues(
+    client: GitHubClient, repo: str, *, max_items: int = 30
+) -> list[GitHubIssue]:
+    """Open issues for ``repo`` ("owner/repo"), most-recently-updated first.
+
+    The ``/repos/{repo}/issues`` endpoint also returns pull requests — each
+    PR-as-issue payload carries a ``"pull_request"`` key — which are
+    filtered out here so callers never have to special-case them.
+    """
+    issues: list[GitHubIssue] = []
+    async for payload in client.paginate(
+        f"/repos/{repo}/issues",
+        params={"state": "open", "sort": "updated", "direction": "desc"},
+        per_page=min(max_items, 100),
+    ):
+        if "pull_request" in payload:
+            continue
+        issues.append(GitHubIssue.from_api(payload))
+        if len(issues) >= max_items:
+            break
+    return issues
+
+
 async def collect_related_changes(
     client: GitHubClient, repo: str, number: int
 ) -> list[RelatedChange]:

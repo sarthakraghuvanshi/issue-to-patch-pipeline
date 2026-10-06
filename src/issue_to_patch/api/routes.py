@@ -11,8 +11,11 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from starlette.concurrency import run_in_threadpool
 
+from issue_to_patch.api import pending_runs
 from issue_to_patch.api._common import branch_target as _branch_target
 from issue_to_patch.api._common import checks_out as _checks_out
 from issue_to_patch.api._common import load_or_404 as _load_or_404
@@ -28,6 +31,7 @@ from issue_to_patch.api.deps import (
 )
 from issue_to_patch.api.schemas import (
     ApproveRequest,
+    AutoRunAcceptedResponse,
     AutoRunRequest,
     BuildResponse,
     PatchResponse,
@@ -48,8 +52,10 @@ from issue_to_patch.api.schemas import (
     ValidatePatchResponse,
 )
 from issue_to_patch.auto_run import auto_index, auto_ingest, auto_investigate
+from issue_to_patch.config import Settings
 from issue_to_patch.graph import HumanDecision, resume_investigation, start_investigation
-from issue_to_patch.ingestion.errors import GitHubAPIError, IngestionError, RepositoryNotFound
+from issue_to_patch.graph.deps import GraphDependencies
+from issue_to_patch.ingestion.errors import GitHubAPIError, RepositoryNotFound
 from issue_to_patch.ingestion.git_ops import SafeGit
 from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.ingestion.snapshot import load_snapshot
@@ -96,14 +102,42 @@ def start_run(
     return _to_response(handle)
 
 
-@runs_router.post("/auto", response_model=RunStateResponse, status_code=201)
-async def start_auto_run(
-    body: AutoRunRequest, deps: GraphDepsDep, checkpointer: CheckpointerDep, settings: SettingsDep
-) -> RunStateResponse:
+@runs_router.post("/auto", response_model=AutoRunAcceptedResponse, status_code=202)
+def start_auto_run(
+    body: AutoRunRequest,
+    background_tasks: BackgroundTasks,
+    deps: GraphDepsDep,
+    checkpointer: CheckpointerDep,
+    settings: SettingsDep,
+) -> AutoRunAcceptedResponse:
     """Like ``POST /runs``, but does the ingest+index itself from a bare
-    issue URL — the same ``auto_ingest``/``auto_index``/``auto_investigate``
-    the `auto` CLI command calls, so the two can never drift."""
+    issue URL, and does all of it — ingest, index, investigate — in a
+    background task so this call returns immediately with a run_id to poll
+    (``GET /ui/runs/{run_id}`` shows progress), instead of blocking the one
+    event loop for the full 1-2 minutes every other request would then
+    share. A bad issue_url (or any other pipeline failure) can no longer be
+    reported as a synchronous 400 here — it surfaces only via the run's own
+    page or ``pending_runs.get(run_id)``, since by the time ingest actually
+    runs, this response has already been sent."""
     run_id = uuid.uuid4().hex[:16]
+    pending_runs.mark_stage(run_id, "ingesting")
+    background_tasks.add_task(_run_auto_pipeline, run_id, body, deps, checkpointer, settings)
+    return AutoRunAcceptedResponse(run_id=run_id)
+
+
+async def _run_auto_pipeline(
+    run_id: str,
+    body: AutoRunRequest,
+    deps: GraphDependencies,
+    checkpointer: BaseCheckpointSaver[str],
+    settings: Settings,
+) -> None:
+    """The actual ingest -> index -> investigate pipeline, run after the
+    202 response above has already gone out. auto_index/auto_investigate
+    are plain sync, blocking functions (auto_run.py) — run_in_threadpool is
+    what keeps them off the event loop here, which also fixes this route's
+    pre-existing "blocks every other request for 1-2 minutes" bug, as a
+    side effect of making this a real background task."""
     run_dir = settings.artifacts_dir / run_id
     try:
         await auto_ingest(
@@ -114,19 +148,27 @@ async def start_auto_run(
             repo_source=body.repo_source,
             ref=body.ref,
         )
-    except IngestionError as exc:
-        raise HTTPException(400, f"ingest failed: {exc}") from exc
-    try:
-        snapshot, _ = auto_index(run_dir, deps.store, max_lines=body.max_lines)
-    except Exception as exc:
-        raise HTTPException(400, f"index failed: {exc}") from exc
-    try:
-        handle = auto_investigate(
-            body.issue_url, snapshot, deps, checkpointer, run_id=run_id, scope=body.scope
+        pending_runs.mark_stage(run_id, "indexing")
+        snapshot, _ = await run_in_threadpool(
+            auto_index, run_dir, deps.store, max_lines=body.max_lines
+        )
+        pending_runs.mark_stage(run_id, "investigating")
+        await run_in_threadpool(
+            auto_investigate,
+            body.issue_url,
+            snapshot,
+            deps,
+            checkpointer,
+            run_id=run_id,
+            scope=body.scope,
         )
     except Exception as exc:
-        raise HTTPException(500, f"investigation failed: {exc}") from exc
-    return _to_response(handle)
+        # Nothing left to attach an HTTPException to — an uncaught
+        # exception here would leave the pending page stuck on
+        # "investigating..." forever with no feedback at all.
+        pending_runs.mark_failed(run_id, str(exc))
+    else:
+        pending_runs.clear(run_id)
 
 
 @runs_router.get("/{run_id}", response_model=RunStateResponse)
