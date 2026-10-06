@@ -19,6 +19,7 @@ PERSIST_RUN = "PersistRun"
 PLAN_INVESTIGATION = "PlanInvestigation"
 SELECT_ADDITIONAL_EVIDENCE = "SelectAdditionalEvidence"
 ANALYZE_ROOT_CAUSE = "AnalyzeRootCause"
+DISCOVER_RELATED_FILES = "DiscoverRelatedFiles"
 DRAFT_PATCH = "DraftPatch"
 RUN_PATCH_VALIDATION = "RunPatchValidation"
 REQUEST_HUMAN_VALIDATION = "RequestHumanValidation"
@@ -62,7 +63,7 @@ def route_after_analyze(state: InvestigationState, settings: Settings) -> str:
     if conflicting and not state.get("expanded"):
         return SELECT_ADDITIONAL_EVIDENCE
 
-    return DRAFT_PATCH
+    return DISCOVER_RELATED_FILES
 
 
 def route_after_draft(state: InvestigationState, settings: Settings) -> str:

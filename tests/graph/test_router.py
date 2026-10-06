@@ -112,23 +112,23 @@ def test_conflicting_top_hypotheses_trigger_additional_retrieval() -> None:
     assert router.route_after_analyze(state, _SETTINGS) == router.SELECT_ADDITIONAL_EVIDENCE
 
 
-def test_conflicting_hypotheses_after_expansion_proceed_to_draft_anyway() -> None:
+def test_conflicting_hypotheses_after_expansion_proceed_past_analysis_anyway() -> None:
     state = new_state(run_id="r1", issue_ref="x")
     state["hypotheses"] = [
         Hypothesis(summary="a", confidence=0.6),
         Hypothesis(summary="b", confidence=0.58),
     ]
     state["expanded"] = True
-    assert router.route_after_analyze(state, _SETTINGS) == router.DRAFT_PATCH
+    assert router.route_after_analyze(state, _SETTINGS) == router.DISCOVER_RELATED_FILES
 
 
-def test_confident_clear_winner_proceeds_to_draft() -> None:
+def test_confident_clear_winner_proceeds_to_discover_related_files() -> None:
     state = new_state(run_id="r1", issue_ref="x")
     state["hypotheses"] = [
         Hypothesis(summary="a", confidence=0.9),
         Hypothesis(summary="b", confidence=0.2),
     ]
-    assert router.route_after_analyze(state, _SETTINGS) == router.DRAFT_PATCH
+    assert router.route_after_analyze(state, _SETTINGS) == router.DISCOVER_RELATED_FILES
 
 
 def test_failed_edit_application_revises_when_budget_remains() -> None:

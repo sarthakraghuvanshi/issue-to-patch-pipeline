@@ -117,6 +117,7 @@ class InvestigationState(TypedDict, total=False):
     validation: ValidationReport | None
     revisions_used: Annotated[int, operator.add]
     expanded: bool
+    discovery_done: bool
 
     human_decision: HumanDecision | None
     evaluation: EvaluationReport | None
@@ -144,6 +145,7 @@ def new_state(
         validation=None,
         revisions_used=0,
         expanded=False,
+        discovery_done=False,
         human_decision=None,
         evaluation=None,
         final_state=None,

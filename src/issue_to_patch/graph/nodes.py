@@ -15,7 +15,7 @@ Every other node is as deterministic as Sprints 1-4 already made it.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,8 @@ from issue_to_patch.patching.context import PATCH_INSTRUCTIONS, effective_scope,
 from issue_to_patch.patching.models import EditPlan
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.patching.worktree import EditApplicationError, generate_patch
-from issue_to_patch.retrieval.models import RetrievalMode, SearchFilters
+from issue_to_patch.processing.parser import is_probably_test_path
+from issue_to_patch.retrieval.models import RetrievalMode, ScoredChunk, SearchFilters
 from issue_to_patch.run_states import RunState
 
 # agents.pipeline imports graph.deps/graph.state, and graph/__init__.py
@@ -51,6 +52,16 @@ _log = get_logger("graph.nodes")
 
 _EVIDENCE_TOP_K = 8
 _EXPANDED_TOP_K = 16
+
+# DiscoverRelatedFiles: a real fix often needs more than the one file that
+# best matches the issue text — a caller of the function being changed, or
+# that file's own test. These bound how far it looks, so a heavily-called
+# symbol in a huge repo can't blow up the prompt.
+_RELATED_SYMBOL_TOP_K = 5
+_RELATED_TEST_TOP_K = 3
+_MAX_RELATED_SYMBOLS = 5
+_MAX_RELATED_PATHS = 5
+_MAX_DISCOVERED_CHUNKS = 10
 
 # retrieve_code_context/select_additional_evidence always search in HYBRID
 # mode, whose score is a reciprocal-rank-fusion sum (1/(k+rank) per ranker) —
@@ -251,6 +262,83 @@ def select_additional_evidence(
             )
         )
     return {"evidence": evidence, "expanded": True}
+
+
+# -- 6b. DiscoverRelatedFiles ------------------------------------------------
+def discover_related_files(state: InvestigationState, deps: GraphDependencies) -> dict[str, object]:
+    """A fix drafted from issue-text search alone tends to land entirely in
+    the one file that best matches the issue's wording — nothing has yet
+    looked for other callers of the symbol being changed, or for that
+    file's own test. Runs once, unconditionally, after the top hypothesis
+    is known but before drafting, so draft_patch's evidence (and therefore
+    effective_scope(), which derives its allowed paths from evidence) isn't
+    artificially boxed into a single file from the start.
+    """
+    hypotheses = state.get("hypotheses")
+    top = hypotheses[0] if hypotheses else None
+    if top is None:
+        return {"discovery_done": True}
+
+    repo = state["repository"]
+    assert repo is not None
+    filters = SearchFilters(repository=repo.repo or repo.source, commit_sha=repo.commit_sha)
+    seen = {e.source_location.chunk_id for e in state["evidence"] if e.source_location}
+
+    symbols = list(dict.fromkeys(loc.symbol for loc in top.cites if loc.symbol))
+    paths = list(dict.fromkeys(loc.path for loc in top.cites if loc.path))
+
+    discovered: list[Evidence] = []
+    try:
+        for symbol in symbols[:_MAX_RELATED_SYMBOLS]:
+            if len(discovered) >= _MAX_DISCOVERED_CHUNKS:
+                break
+            trace = deps.retrieval.search(
+                symbol, filters, top_k=_RELATED_SYMBOL_TOP_K, mode=RetrievalMode.BM25, expand=False
+            )
+            discovered.extend(_new_evidence(trace.results, seen, deps))
+
+        for path in paths[:_MAX_RELATED_PATHS]:
+            if len(discovered) >= _MAX_DISCOVERED_CHUNKS or is_probably_test_path(path):
+                continue
+            stem = PurePosixPath(path).stem
+            trace = deps.retrieval.search(
+                stem, filters, top_k=_RELATED_TEST_TOP_K, mode=RetrievalMode.BM25
+            )
+            test_hits = [hit for hit in trace.results if is_probably_test_path(hit.path)]
+            discovered.extend(_new_evidence(test_hits, seen, deps))
+    except LookupError as exc:  # nothing indexed for this repo@sha
+        return {"errors": [f"discover_related_files: {exc}"], "discovery_done": True}
+
+    return {"evidence": discovered[:_MAX_DISCOVERED_CHUNKS], "discovery_done": True}
+
+
+def _new_evidence(
+    hits: list[ScoredChunk], seen: set[str], deps: GraphDependencies
+) -> list[Evidence]:
+    """Shared by both DiscoverRelatedFiles passes: turn search hits not
+    already in ``seen`` into Evidence, marking ``seen`` as it goes so the
+    symbol and test passes don't duplicate each other's finds."""
+    evidence: list[Evidence] = []
+    for hit in hits:
+        if hit.chunk_id in seen:
+            continue
+        seen.add(hit.chunk_id)
+        row = deps.store.get_chunk(hit.chunk_id)
+        evidence.append(
+            Evidence(
+                kind="code",
+                content=row.content if row is not None else "",
+                source_location=SourceLocation(
+                    chunk_id=hit.chunk_id,
+                    path=hit.path,
+                    line_start=hit.line_start,
+                    line_end=hit.line_end,
+                    symbol=hit.symbol,
+                ),
+                score=hit.score,
+            )
+        )
+    return evidence
 
 
 # -- 7. DraftPatch ----------------------------------------------------------

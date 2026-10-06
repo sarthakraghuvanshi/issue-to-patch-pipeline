@@ -136,6 +136,105 @@ def test_select_additional_evidence_marks_expanded_and_skips_duplicates(indexed)
     assert all(e.source_location.chunk_id not in seen_before for e in out["evidence"])
 
 
+# -- DiscoverRelatedFiles ----------------------------------------------------
+def _state_citing_parser(snap: RepositorySnapshot):
+    state = new_state(run_id="r1", issue_ref="x")
+    state["repository"] = snap
+    loc = SourceLocation(
+        chunk_id="src/sample/parser.py::parse_issue_url",
+        path="src/sample/parser.py",
+        line_start=5,
+        line_end=6,
+        symbol="parse_issue_url",
+    )
+    evidence = Evidence(
+        kind="code", content="def parse_issue_url(...): ...", source_location=loc, score=0.9
+    )
+    state["evidence"] = [evidence]
+    state["hypotheses"] = [
+        Hypothesis(summary="strips whitespace wrong", confidence=0.8, cites=[loc])
+    ]
+    return state
+
+
+def test_discover_related_files_finds_the_companion_test_by_symbol_and_stem(indexed) -> None:
+    deps, snap = indexed
+    state = _state_citing_parser(snap)
+
+    out = nodes.discover_related_files(state, deps)
+    assert out["discovery_done"] is True
+    assert any(e.source_location.path == "tests/test_parser.py" for e in out["evidence"]), [
+        e.source_location.path for e in out["evidence"]
+    ]
+
+
+def test_discover_related_files_dedupes_against_existing_evidence(indexed) -> None:
+    deps, snap = indexed
+    state = _state_citing_parser(snap)
+
+    first = nodes.discover_related_files(state, deps)
+    state["evidence"] = state["evidence"] + first["evidence"]
+
+    second = nodes.discover_related_files(state, deps)
+    first_ids = {e.source_location.chunk_id for e in first["evidence"]}
+    assert all(e.source_location.chunk_id not in first_ids for e in second["evidence"])
+
+
+def test_discover_related_files_is_a_noop_with_no_hypotheses(indexed) -> None:
+    deps, snap = indexed
+    state = new_state(run_id="r1", issue_ref="x")
+    state["repository"] = snap
+    out = nodes.discover_related_files(state, deps)
+    assert out == {"discovery_done": True}
+
+
+def test_discover_related_files_output_widens_effective_scope(indexed) -> None:
+    from issue_to_patch.patching.context import effective_scope
+
+    deps, snap = indexed
+    state = _state_citing_parser(snap)
+    out = nodes.discover_related_files(state, deps)
+    state["evidence"] = state["evidence"] + out["evidence"]
+
+    assert "tests/test_parser.py" in effective_scope(state)
+
+
+def test_discover_related_files_respects_the_discovery_cap(
+    indexed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from issue_to_patch.retrieval.models import RetrievalTrace, ScoredChunk, SearchFilters
+
+    deps, snap = indexed
+    state = _state_citing_parser(snap)
+
+    def _fake_search(query, filters, **kwargs):
+        hits = [
+            ScoredChunk(
+                chunk_id=f"fake-{query}-{i}",
+                rank=i,
+                score=1.0,
+                path=f"fake_{query}_{i}.py",
+                symbol=None,
+                line_start=1,
+                line_end=1,
+                kind="symbol",
+            )
+            for i in range(8)
+        ]
+        return RetrievalTrace(
+            query=query,
+            mode=kwargs.get("mode"),
+            filters=filters
+            if isinstance(filters, SearchFilters)
+            else SearchFilters(repository="r", commit_sha="s"),
+            results=hits,
+        )
+
+    monkeypatch.setattr(deps.retrieval, "search", _fake_search)
+    out = nodes.discover_related_files(state, deps)
+    assert len(out["evidence"]) <= nodes._MAX_DISCOVERED_CHUNKS
+
+
 # -- AnalyzeRootCause -------------------------------------------------------
 def test_analyze_root_cause_returns_llm_hypotheses(tmp_path: Path) -> None:
     llm = FakeLLM()

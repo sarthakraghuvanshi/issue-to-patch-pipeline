@@ -1,4 +1,4 @@
-"""Assemble the reasoning graph: 12 nodes, the deterministic router between
+"""Assemble the reasoning graph: 13 nodes, the deterministic router between
 them, and a checkpointer that pauses the run at the human-review gate."""
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ _RETRIEVE_ISSUE_CONTEXT = "RetrieveIssueContext"
 _RETRIEVE_CODE_CONTEXT = "RetrieveCodeContext"
 _ANALYZE_ROOT_CAUSE = router.ANALYZE_ROOT_CAUSE
 _SELECT_ADDITIONAL_EVIDENCE = router.SELECT_ADDITIONAL_EVIDENCE
+_DISCOVER_RELATED_FILES = router.DISCOVER_RELATED_FILES
 _DRAFT_PATCH = router.DRAFT_PATCH
 _RUN_PATCH_VALIDATION = router.RUN_PATCH_VALIDATION
 _REQUEST_HUMAN_VALIDATION = router.REQUEST_HUMAN_VALIDATION
@@ -58,6 +59,7 @@ def build_graph(
     graph.add_node(_RETRIEVE_CODE_CONTEXT, node(nodes.retrieve_code_context))
     graph.add_node(_ANALYZE_ROOT_CAUSE, node(nodes.analyze_root_cause))
     graph.add_node(_SELECT_ADDITIONAL_EVIDENCE, node(nodes.select_additional_evidence))
+    graph.add_node(_DISCOVER_RELATED_FILES, node(nodes.discover_related_files))
     graph.add_node(_DRAFT_PATCH, node(nodes.draft_patch))
     graph.add_node(_RUN_PATCH_VALIDATION, node(nodes.run_patch_validation))
     graph.add_node(_REQUEST_HUMAN_VALIDATION, node(nodes.request_human_validation))
@@ -76,6 +78,7 @@ def build_graph(
     graph.add_conditional_edges(
         _ANALYZE_ROOT_CAUSE, partial(router.route_after_analyze, settings=settings)
     )
+    graph.add_edge(_DISCOVER_RELATED_FILES, _DRAFT_PATCH)
     route_after_draft = partial(router.route_after_draft, settings=settings)
     graph.add_conditional_edges(_DRAFT_PATCH, route_after_draft)
     graph.add_conditional_edges(
