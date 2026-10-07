@@ -93,3 +93,41 @@ def test_test_files_are_recorded_as_references(indexable_repo: Path, tmp_path: P
 
         row = session.query(ChunkRow).filter(ChunkRow.symbol == "parse_issue_url").one()
     assert "tests/test_parser.py" in row.reference_paths
+
+
+def test_embedding_is_one_batched_call_not_one_per_chunk(
+    indexable_repo: Path, tmp_path: Path
+) -> None:
+    """A real provider-backed embedder makes a real HTTP call per embed_batch
+    invocation - indexing a whole repo as one (or a few, size-capped) batch
+    calls instead of one call per chunk is the difference between a handful
+    of requests and thousands for a large repo."""
+
+    class _RecordingEmbedder:
+        dim = 4
+        batch_call_count = 0
+        single_embed_call_count = 0
+
+        def embed(self, text: str) -> list[float]:
+            self.single_embed_call_count += 1
+            return [0.0, 0.0, 0.0, 0.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            self.batch_call_count += 1
+            return [[0.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    snap = _snapshot(indexable_repo, tmp_path / "snap")
+    store = _store(tmp_path)
+    embedder = _RecordingEmbedder()
+
+    result = index_snapshot(snap, store, embedder=embedder)  # type: ignore[arg-type]
+
+    assert result.chunks_written > 1  # otherwise this test proves nothing
+    assert embedder.batch_call_count == 1
+    assert embedder.single_embed_call_count == 0
+
+    from issue_to_patch.persistence import ChunkRow
+
+    with store.session() as session:
+        rows = session.query(ChunkRow).all()
+        assert all(row.embedding == [0.0, 0.0, 0.0, 0.0] for row in rows)

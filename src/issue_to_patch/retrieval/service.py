@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from issue_to_patch.llm.client import get_embedder
 from issue_to_patch.logging import get_logger
-from issue_to_patch.persistence import ChunkRow, HashingEmbedder, Store, brute_force_search
+from issue_to_patch.persistence import ChunkRow, Store, brute_force_search
 from issue_to_patch.persistence.vector import Embedder
 from issue_to_patch.retrieval.bm25 import BM25Hit, BM25Index
 from issue_to_patch.retrieval.expand import expand_query
@@ -41,7 +42,7 @@ class _RepoIndex:
 class RetrievalService:
     def __init__(self, store: Store, embedder: Embedder | None = None) -> None:
         self._store = store
-        self._embedder = embedder or HashingEmbedder()
+        self._embedder = embedder or get_embedder()
         self._cache: dict[tuple[str, str], _RepoIndex] = {}
 
     # -- indexing --------------------------------------------------

@@ -15,8 +15,9 @@ from pathlib import Path, PurePosixPath
 
 from issue_to_patch.ingestion.git_ops import SafeGit
 from issue_to_patch.ingestion.models import RepositorySnapshot
+from issue_to_patch.llm.client import get_embedder
 from issue_to_patch.logging import get_logger
-from issue_to_patch.persistence import HashingEmbedder, Store
+from issue_to_patch.persistence import Store
 from issue_to_patch.persistence.vector import Embedder
 from issue_to_patch.processing.chunker import DEFAULT_MAX_LINES, StructureAwareChunker
 from issue_to_patch.processing.metadata import MetadataEnricher
@@ -65,7 +66,7 @@ def index_snapshot(
     analyzer = StructureAnalyzer()
     chunker = StructureAwareChunker(max_lines=max_lines)
     enricher = MetadataEnricher()
-    embedder = embedder or HashingEmbedder()
+    embedder = embedder or get_embedder()
 
     candidates = [p for p in tracked if _should_index(p)]
     test_index = _build_test_index(repo_path, candidates)
@@ -92,10 +93,15 @@ def index_snapshot(
         all_chunks.extend(enricher.enrich(c, structure, test_index=test_index) for c in chunks)
         indexed += 1
 
+    # One batched embedding call for every chunk, not one call per chunk -
+    # for a real provider-backed embedder (as opposed to the free, local
+    # HashingEmbedder) a large repo would otherwise mean thousands of
+    # sequential HTTP round trips just to index it once.
+    embeddings = embedder.embed_batch([_embed_text(c) for c in all_chunks])
     written = store.replace_chunks(
         repository,
         snapshot.commit_sha,
-        [_row(c, embedder) for c in all_chunks],
+        [_row(c, vec) for c, vec in zip(all_chunks, embeddings, strict=True)],
     )
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -141,11 +147,14 @@ def _build_test_index(repo_path: Path, candidates: list[str]) -> dict[str, list[
     return index
 
 
-def _row(chunk: Chunk, embedder: Embedder) -> dict[str, object]:
-    data: dict[str, object] = json.loads(chunk.model_dump_json())
-    data["reference_paths"] = data.pop("references")
-    embed_text = "\n".join(
+def _embed_text(chunk: Chunk) -> str:
+    return "\n".join(
         [chunk.path, chunk.symbol or "", chunk.summary, " ".join(chunk.keywords), chunk.content]
     )
-    data["embedding"] = embedder.embed(embed_text)
+
+
+def _row(chunk: Chunk, embedding: list[float]) -> dict[str, object]:
+    data: dict[str, object] = json.loads(chunk.model_dump_json())
+    data["reference_paths"] = data.pop("references")
+    data["embedding"] = embedding
     return data

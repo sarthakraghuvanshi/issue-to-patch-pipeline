@@ -14,6 +14,7 @@ from issue_to_patch.persistence.vector import (
     DEFAULT_DIM,
     Embedder,
     HashingEmbedder,
+    OpenAIEmbedder,
     brute_force_search,
     cosine,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "Embedder",
     "HashingEmbedder",
     "HumanDecisionRow",
+    "OpenAIEmbedder",
     "Run",
     "Store",
     "ToolCall",

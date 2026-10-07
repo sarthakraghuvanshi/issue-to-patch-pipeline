@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 
 from issue_to_patch.config import Settings, get_settings
 from issue_to_patch.config.settings import LLMProvider
+from issue_to_patch.persistence.vector import Embedder, HashingEmbedder, OpenAIEmbedder
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -376,3 +377,28 @@ def get_llm(settings: Settings | None = None) -> LLMClient:
     raise NotImplementedError(
         f"provider {settings.llm_provider!r} has no client implementation yet"
     )
+
+
+def get_embedder(settings: Settings | None = None) -> Embedder:
+    """Embeddings are OpenAI-only regardless of which LLM provider is
+    chosen for reasoning (there is no public Anthropic embeddings API), so
+    unlike :func:`get_llm` this checks for an OpenAI key directly rather
+    than switching on ``llm_provider`` - an Anthropic-reasoning run with an
+    OpenAI key configured still gets real embeddings.
+
+    ``llm_provider is FAKE`` is still checked first and always wins: that's
+    this project's existing, established "offline, no real provider" signal
+    (every test sets ``ITP_LLM_PROVIDER=fake``) - without it, a real key
+    merely present in a local ``.env`` would make every test suite call a
+    real, billed API, exactly the failure mode this project's test suite is
+    designed to never hit. A missing/fake-mode key is never an error either
+    way - it just falls back to the free, offline :class:`HashingEmbedder`,
+    so every existing local/CI setup keeps working unchanged.
+    """
+    settings = settings or get_settings()
+    if settings.llm_provider is LLMProvider.FAKE:
+        return HashingEmbedder()
+    key = settings.openai_api_key or settings.llm_api_key
+    if key is None:
+        return HashingEmbedder()
+    return OpenAIEmbedder(api_key=key.get_secret_value(), model=settings.embedding_model)

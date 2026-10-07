@@ -5,8 +5,9 @@ Two swappable embedders:
 * :class:`HashingEmbedder` — deterministic, offline, zero-cost. A hashed
   bag-of-tokens projected to a fixed dimension and L2-normalised. Weak, but real
   enough to exercise the hybrid path and the eval harness with no provider.
-* a provider-backed embedder is added in Sprint 5 behind ``llm/client.py``; it
-  satisfies the same :class:`Embedder` protocol.
+* :class:`OpenAIEmbedder` — a real provider-backed embedder, same
+  :class:`Embedder` protocol. Selected by ``llm/client.py``'s
+  ``get_embedder()`` whenever an OpenAI key is configured.
 
 Similarity search here is brute-force cosine in Python. In staging/prod this is
 replaced by a ``pgvector`` ``<->`` query on the same table — the interface
@@ -18,9 +19,18 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from openai import OpenAI
+
 DEFAULT_DIM = 256
+# text-embedding-3-small's native output dimension.
+_OPENAI_EMBEDDING_DIM = 1536
+# OpenAI's embeddings endpoint accepts a list input natively; batching keeps
+# a large repo's indexing to a handful of requests instead of one per chunk,
+# without risking a single oversized request.
+_OPENAI_BATCH_SIZE = 100
 
 # A plain tokeniser — the code-aware one lives in retrieval/ and must not be
 # imported here (persistence is a lower layer). Splits words and camelCase.
@@ -44,6 +54,7 @@ class Embedder(Protocol):
     dim: int
 
     def embed(self, text: str) -> list[float]: ...
+    def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class HashingEmbedder:
@@ -63,6 +74,35 @@ class HashingEmbedder:
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
+
+
+@dataclass
+class OpenAIEmbedder:
+    """A real, provider-backed embedding — satisfies the same :class:`Embedder`
+    protocol as :class:`HashingEmbedder`, selected instead of it by
+    ``llm/client.py``'s ``get_embedder()`` whenever an OpenAI key is configured.
+    """
+
+    api_key: str
+    model: str = "text-embedding-3-small"
+    client: OpenAI | None = None  # injectable, so tests never touch the network
+    dim: int = _OPENAI_EMBEDDING_DIM
+
+    _client: OpenAI = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._client = self.client or OpenAI(api_key=self.api_key)
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for start in range(0, len(texts), _OPENAI_BATCH_SIZE):
+            batch = texts[start : start + _OPENAI_BATCH_SIZE]
+            response = self._client.embeddings.create(model=self.model, input=batch)
+            out.extend(d.embedding for d in response.data)
+        return out
 
 
 def cosine(a: list[float], b: list[float]) -> float:
