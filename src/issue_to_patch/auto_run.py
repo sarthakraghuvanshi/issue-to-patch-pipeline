@@ -58,9 +58,13 @@ def auto_investigate(
     *,
     run_id: str,
     scope: list[str] | None = None,
+    provisional_plan: str | None = None,
+    plan_issue_text: str | None = None,
 ) -> InvestigationHandle:
     return start_investigation(
         issue_ref=issue_url,
+        provisional_plan=provisional_plan,
+        plan_issue_text=plan_issue_text,
         repository=snapshot,
         deps=deps,
         allowed_scope=scope,

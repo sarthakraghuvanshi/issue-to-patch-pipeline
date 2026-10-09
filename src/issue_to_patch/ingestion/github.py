@@ -38,6 +38,7 @@ _DEFAULT_HEADERS = {
 class _CacheEntry:
     etag: str
     payload: Any
+    link: str = ""
 
 
 @dataclass
@@ -79,6 +80,12 @@ class GitHubClient:
         response = await self._request("GET", path, params=params)
         return response.json()
 
+    async def get_page(
+        self, path: str, *, params: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        response = await self._request("GET", path, params=params)
+        return response.json(), "next" in response.links
+
     async def post_json(self, path: str, *, json: dict[str, Any]) -> Any:
         response = await self._request("POST", path, json=json)
         return response.json()
@@ -119,7 +126,10 @@ class GitHubClient:
 
             if response.status_code == 304 and cached is not None:
                 return httpx.Response(
-                    200, json=cached.payload, headers=response.headers, request=response.request
+                    200,
+                    json=cached.payload,
+                    headers={**response.headers, "Link": response.headers.get("Link", cached.link)},
+                    request=response.request,
                 )
 
             if response.status_code == 404:
@@ -153,7 +163,9 @@ class GitHubClient:
 
             etag = response.headers.get("ETag")
             if method == "GET" and etag:
-                self._etags[cache_key] = _CacheEntry(etag=etag, payload=response.json())
+                self._etags[cache_key] = _CacheEntry(
+                    etag=etag, payload=response.json(), link=response.headers.get("Link", "")
+                )
             return response
 
     # -- pagination ---------------------------------------------------

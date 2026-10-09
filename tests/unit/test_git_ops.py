@@ -119,3 +119,25 @@ def test_non_push_subcommands_do_not_get_the_real_environment(
     git.run("init", "-q", "-b", "main")
     git.run("config", "user.email", "x@y.z")
     assert not marker.exists()
+
+
+def test_timeout_terminates_git_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+    import subprocess
+    from unittest.mock import MagicMock
+
+    process = MagicMock()
+    process.pid = 987654
+    process.communicate.side_effect = [subprocess.TimeoutExpired("git", 1), ("", "")]
+    popen = MagicMock()
+    popen.return_value.__enter__.return_value = process
+    killpg = MagicMock()
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr("issue_to_patch.ingestion.git_ops.os.killpg", killpg)
+    with pytest.raises(TimeoutError, match="Repository preparation timed out"):
+        SafeGit(root=tmp_path).run(
+            "clone", "https://example.com/repo.git", "repo", timeout_seconds=1
+        )
+    killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+    assert process.communicate.call_count == 2
+    assert popen.call_args.kwargs["start_new_session"] is True

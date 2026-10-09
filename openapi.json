@@ -162,6 +162,18 @@
             "title": "Max Lines",
             "type": "integer"
           },
+          "plan_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reuse a saved resolution plan snapshot",
+            "title": "Plan Id"
+          },
           "ref": {
             "anyOf": [
               {
@@ -376,6 +388,216 @@
         "title": "PatchResponse",
         "type": "object"
       },
+      "PlanAccepted": {
+        "properties": {
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "title": "PlanAccepted",
+        "type": "object"
+      },
+      "PlanRequest": {
+        "properties": {
+          "issue_url": {
+            "maxLength": 512,
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "request_id": {
+            "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_url"
+        ],
+        "title": "PlanRequest",
+        "type": "object"
+      },
+      "PlanResponse": {
+        "properties": {
+          "commit_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Sha"
+          },
+          "context_truncated": {
+            "title": "Context Truncated",
+            "type": "boolean"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "issue_url": {
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResolutionPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/PlanSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "fetching",
+              "preparing",
+              "retrieving",
+              "writing",
+              "ready",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "issue_url",
+          "status",
+          "commit_sha",
+          "result",
+          "sources",
+          "context_truncated",
+          "cost_usd",
+          "error"
+        ],
+        "title": "PlanResponse",
+        "type": "object"
+      },
+      "PlanSource": {
+        "properties": {
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "line_end": {
+            "title": "Line End",
+            "type": "integer"
+          },
+          "line_start": {
+            "title": "Line Start",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chunk_id",
+          "path",
+          "line_start",
+          "line_end",
+          "content"
+        ],
+        "title": "PlanSource",
+        "type": "object"
+      },
+      "PlanStep": {
+        "properties": {
+          "references": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "title": "References",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 1200,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "PlanStep",
+        "type": "object"
+      },
+      "PlanSummary": {
+        "properties": {
+          "has_result": {
+            "title": "Has Result",
+            "type": "boolean"
+          },
+          "issue_url": {
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "fetching",
+              "preparing",
+              "retrieving",
+              "writing",
+              "ready",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "issue_url",
+          "status",
+          "has_result"
+        ],
+        "title": "PlanSummary",
+        "type": "object"
+      },
       "PullRequestRequest": {
         "properties": {
           "base": {
@@ -499,6 +721,48 @@
           "detail"
         ],
         "title": "PushResponse",
+        "type": "object"
+      },
+      "ResolutionPlan": {
+        "properties": {
+          "open_questions": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Open Questions",
+            "type": "array"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PlanStep"
+            },
+            "maxItems": 5,
+            "minItems": 3,
+            "title": "Steps",
+            "type": "array"
+          },
+          "understanding": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Understanding",
+            "type": "string"
+          },
+          "verification": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 6,
+            "title": "Verification",
+            "type": "array"
+          }
+        },
+        "required": [
+          "understanding",
+          "steps",
+          "verification"
+        ],
+        "title": "ResolutionPlan",
         "type": "object"
       },
       "RetrievalHitOut": {
@@ -1005,6 +1269,312 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/issue-plans": {
+      "get": {
+        "operationId": "list_plans_issue_plans_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "issue_url",
+            "required": true,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 30,
+              "title": "Issue Url",
+              "type": "array"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlanSummary"
+                  },
+                  "title": "Response List Plans Issue Plans Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Plans",
+        "tags": [
+          "issue-plans"
+        ]
+      },
+      "post": {
+        "operationId": "create_plan_issue_plans_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Plan",
+        "tags": [
+          "issue-plans"
+        ]
+      }
+    },
+    "/issue-plans/{plan_id}": {
+      "get": {
+        "operationId": "get_plan_issue_plans__plan_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Plan",
+        "tags": [
+          "issue-plans"
+        ]
+      }
+    },
+    "/issue-plans/{plan_id}/regenerate": {
+      "post": {
+        "operationId": "regenerate_issue_plans__plan_id__regenerate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Regenerate",
+        "tags": [
+          "issue-plans"
+        ]
+      }
+    },
+    "/issue-plans/{plan_id}/source": {
+      "get": {
+        "operationId": "source_issue_plans__plan_id__source_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "chunk_id",
+            "required": true,
+            "schema": {
+              "title": "Chunk Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanSource"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Source",
+        "tags": [
+          "issue-plans"
+        ]
+      }
+    },
     "/runs": {
       "post": {
         "operationId": "start_run_runs_post",

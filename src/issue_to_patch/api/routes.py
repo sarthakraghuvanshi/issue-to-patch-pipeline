@@ -29,6 +29,7 @@ from issue_to_patch.api.deps import (
     get_current_user,
     rate_limit,
 )
+from issue_to_patch.api.issue_plans import owned_plan
 from issue_to_patch.api.schemas import (
     ApproveRequest,
     AutoRunAcceptedResponse,
@@ -64,6 +65,8 @@ from issue_to_patch.patching.models import PatchArtifact
 from issue_to_patch.patching.push import with_embedded_token
 from issue_to_patch.patching.validate import validate_patch
 from issue_to_patch.persistence.audit import AuditTrail, build_audit_trail
+from issue_to_patch.planning.models import SavedPlan
+from issue_to_patch.planning.service import canonical_issue, plan_snapshot
 from issue_to_patch.pull_request import ForkRemoteNotGitHub, create_pull_request
 from issue_to_patch.retrieval import RetrievalService, SearchFilters
 from issue_to_patch.run_states import RunState
@@ -109,6 +112,7 @@ def start_auto_run(
     deps: GraphDepsDep,
     checkpointer: CheckpointerDep,
     settings: SettingsDep,
+    current_user: CurrentUserDep,
 ) -> AutoRunAcceptedResponse:
     """Like ``POST /runs``, but does the ingest+index itself from a bare
     issue URL, and does all of it — ingest, index, investigate — in a
@@ -119,9 +123,26 @@ def start_auto_run(
     reported as a synchronous 400 here — it surfaces only via the run's own
     page or ``pending_runs.get(run_id)``, since by the time ingest actually
     runs, this response has already been sent."""
+    saved_plan = None
+    if body.plan_id:
+        row = owned_plan(body.plan_id, deps.store, current_user)
+        saved = SavedPlan.model_validate(row.payload)
+        try:
+            if row.status != "ready" or saved.result is None:
+                raise ValueError("Wait for a completed plan before starting an investigation.")
+            if canonical_issue(body.issue_url) != row.issue_url:
+                raise ValueError("This plan belongs to a different issue.")
+            if body.repo_source or body.ref:
+                raise ValueError("A saved plan cannot override its repository or commit.")
+            plan_snapshot(saved, deps)
+            saved_plan = saved
+        except Exception as exc:
+            raise HTTPException(409, "Plan unavailable or incompatible: " + str(exc)) from exc
     run_id = uuid.uuid4().hex[:16]
     pending_runs.mark_stage(run_id, "ingesting")
-    background_tasks.add_task(_run_auto_pipeline, run_id, body, deps, checkpointer, settings)
+    background_tasks.add_task(
+        _run_auto_pipeline, run_id, body, deps, checkpointer, settings, saved_plan
+    )
     return AutoRunAcceptedResponse(run_id=run_id)
 
 
@@ -131,6 +152,7 @@ async def _run_auto_pipeline(
     deps: GraphDependencies,
     checkpointer: BaseCheckpointSaver[str],
     settings: Settings,
+    saved_plan: SavedPlan | None = None,
 ) -> None:
     """The actual ingest -> index -> investigate pipeline, run after the
     202 response above has already gone out. auto_index/auto_investigate
@@ -140,18 +162,26 @@ async def _run_auto_pipeline(
     side effect of making this a real background task."""
     run_dir = settings.artifacts_dir / run_id
     try:
-        await auto_ingest(
-            body.issue_url,
-            run_dir,
-            settings=settings,
-            token=body.token,
-            repo_source=body.repo_source,
-            ref=body.ref,
-        )
-        pending_runs.mark_stage(run_id, "indexing")
-        snapshot, _ = await run_in_threadpool(
-            auto_index, run_dir, deps.store, max_lines=body.max_lines
-        )
+        guidance = None
+        if body.plan_id:
+            if saved_plan is None:
+                raise ValueError("The selected plan is unavailable.")
+            snapshot = plan_snapshot(saved_plan, deps)
+            assert saved_plan.result is not None
+            guidance = saved_plan.result.model_dump_json()
+        else:
+            await auto_ingest(
+                body.issue_url,
+                run_dir,
+                settings=settings,
+                token=body.token,
+                repo_source=body.repo_source,
+                ref=body.ref,
+            )
+            pending_runs.mark_stage(run_id, "indexing")
+            snapshot, _ = await run_in_threadpool(
+                auto_index, run_dir, deps.store, max_lines=body.max_lines
+            )
         pending_runs.mark_stage(run_id, "investigating")
         await run_in_threadpool(
             auto_investigate,
@@ -161,6 +191,14 @@ async def _run_auto_pipeline(
             checkpointer,
             run_id=run_id,
             scope=body.scope,
+            **(
+                {
+                    "provisional_plan": guidance,
+                    "plan_issue_text": saved_plan.issue_text if saved_plan else "",
+                }
+                if guidance
+                else {}
+            ),
         )
     except Exception as exc:
         # Nothing left to attach an HTTPException to — an uncaught
@@ -266,7 +304,9 @@ def build_run(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerDep) ->
     snapshot = handle.state["repository"]
     patch = handle.state["candidate_patch"]
     assert snapshot is not None and patch is not None  # PATCH_VALIDATED guarantees both
-    branch_dir, branch_name = _branch_target(run_id, snapshot)
+    branch_dir, branch_name = _branch_target(
+        run_id, snapshot, shared_snapshot=bool(handle.state.get("provisional_plan"))
+    )
     if branch_dir.exists():
         sha = SafeGit(root=branch_dir).run("rev-parse", "HEAD", cwd=branch_dir).stdout.strip()
     else:
@@ -291,7 +331,9 @@ def push_run(
     snapshot = handle.state.get("repository")
     if snapshot is None:
         raise HTTPException(404, f"no such run: {run_id}")
-    branch_dir, branch_name = _branch_target(run_id, snapshot)
+    branch_dir, branch_name = _branch_target(
+        run_id, snapshot, shared_snapshot=bool(handle.state.get("provisional_plan"))
+    )
     if not branch_dir.exists():
         raise HTTPException(409, "build the branch before pushing")
     # A remote given in the request (e.g. typed into the UI, remembered in
@@ -333,7 +375,9 @@ async def create_pull_request_route(
     snapshot = handle.state.get("repository")
     if snapshot is None:
         raise HTTPException(404, f"no such run: {run_id}")
-    branch_dir, branch_name = _branch_target(run_id, snapshot)
+    branch_dir, branch_name = _branch_target(
+        run_id, snapshot, shared_snapshot=bool(handle.state.get("provisional_plan"))
+    )
     if not branch_dir.exists():
         raise HTTPException(409, "build the branch before creating a pull request")
     token = body.github_token or (

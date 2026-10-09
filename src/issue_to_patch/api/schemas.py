@@ -49,6 +49,7 @@ class AutoRunRequest(BaseModel):
     repo_source: str | None = Field(default=None, description="Override the clone source")
     ref: str | None = Field(default=None, description="Branch/tag/SHA to pin")
     scope: list[str] | None = Field(default=None, description="Glob(s) the patch must stay within")
+    plan_id: str | None = Field(default=None, description="Reuse a saved resolution plan snapshot")
     max_lines: int = Field(default=200, description="Max lines before a big class is split")
 
 

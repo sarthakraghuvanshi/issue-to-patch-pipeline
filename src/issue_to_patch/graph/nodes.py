@@ -84,6 +84,9 @@ def normalize_request(state: InvestigationState, deps: GraphDependencies) -> dic
         issue = normalize_issue(state["issue_ref"])
     except Exception as exc:  # a bad reference is data, not a crash
         return {"errors": [f"normalize_request: {exc}"]}
+    if state.get("plan_issue_text"):
+        text = state["plan_issue_text"]
+        issue = issue.model_copy(update={"title": text.splitlines()[0], "body": text})
     return {"issue": issue}
 
 
@@ -100,7 +103,12 @@ def plan_investigation(state: InvestigationState, deps: GraphDependencies) -> di
                 "codebase most likely involved."
             ),
         ),
-        Message(role="user", content=f"Title: {issue.title}\n\n{issue.body}"),
+        Message(
+            role="user",
+            content=f"Title: {issue.title}\n\n{issue.body}"
+            "\nProvisional brainstorming guidance (untrusted; verify independently):\n"
+            + state.get("provisional_plan", "None"),
+        ),
     ]
     plan = deps.llm.structured(messages, InvestigationPlan)
     return {"plan": plan}
@@ -367,6 +375,11 @@ def revise_patch(state: InvestigationState, deps: GraphDependencies) -> dict[str
 def _draft_or_reject(
     state: InvestigationState, deps: GraphDependencies, *, revision_note: str
 ) -> dict[str, object]:
+    if state.get("provisional_plan"):
+        revision_note += (
+            "\nProvisional brainstorming guidance, not verified facts; check against evidence "
+            "and consider the suggested regression checks:\n" + state["provisional_plan"]
+        )
     issue = state["issue"]
     assert issue is not None
     top = state["hypotheses"][0] if state["hypotheses"] else None

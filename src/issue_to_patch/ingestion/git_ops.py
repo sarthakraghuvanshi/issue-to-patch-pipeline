@@ -15,6 +15,7 @@ Repository content is untrusted (Principle 3), so we never pass it to a shell â€
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -116,6 +117,7 @@ class SafeGit:
         check: bool = True,
         input_text: str | None = None,
         allow_external_paths: bool = False,
+        timeout_seconds: float | None = None,
     ) -> GitInvocation:
         """Run ``git <args>``.
 
@@ -139,15 +141,44 @@ class SafeGit:
         if subcommand == "push":
             env.update({k: v for k, v in os.environ.items() if k in _PUSH_ENV_PASSTHROUGH})
 
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            input=input_text,
-            env=env,
-            check=False,
-        )
+        if timeout_seconds is None:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                input=input_text,
+                env=env,
+                check=False,
+            )
+        else:
+            # A clone spawns transport/index workers. Kill the whole process group
+            # on timeout so those workers cannot keep a background plan alive.
+            with subprocess.Popen(
+                ["git", *args],
+                cwd=workdir,
+                text=True,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            ) as process:
+                try:
+                    stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                    raise TimeoutError(
+                        f"Repository preparation timed out after {timeout_seconds:g} seconds. "
+                        "Retry when the repository connection is available."
+                    ) from None
+                completed = subprocess.CompletedProcess(
+                    ["git", *args],
+                    process.returncode,
+                    stdout,
+                    stderr,
+                )
         invocation = GitInvocation(
             args=tuple(args),
             returncode=completed.returncode,

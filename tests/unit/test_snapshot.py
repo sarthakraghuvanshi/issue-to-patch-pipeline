@@ -29,3 +29,24 @@ def test_load_snapshot_resolves_a_relative_path_to_absolute(
     assert loaded.root_path.is_absolute()
     assert loaded.root_path == (dest_dir / "repo").resolve()
     assert (loaded.root_path / ".git").exists()
+
+
+def test_shallow_snapshot_preserves_head_without_history(
+    fixture_repo: Path, tmp_path: Path
+) -> None:
+    from issue_to_patch.ingestion.git_ops import SafeGit
+
+    source_git = SafeGit(root=fixture_repo)
+    source_git.run("commit", "--allow-empty", "-m", "second commit")
+    expected = source_git.run("rev-parse", "HEAD").stdout.strip()
+    snapshot = create_snapshot(
+        str(fixture_repo),
+        tmp_path / "shallow",
+        shallow=True,
+        timeout_seconds=10,
+    )
+    git = SafeGit(root=snapshot.root_path)
+    assert snapshot.commit_sha == expected
+    assert git.run("rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+    assert git.run("log", "--format=%H").stdout.splitlines() == [expected]
+    assert load_snapshot(tmp_path / "shallow").commit_sha == expected

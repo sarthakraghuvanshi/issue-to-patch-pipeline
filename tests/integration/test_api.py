@@ -87,6 +87,10 @@ async def test_openapi_schema_lists_every_endpoint(client: tuple) -> None:
     assert response.status_code == 200
     paths = response.json()["paths"]
     assert set(paths) == {
+        "/issue-plans",
+        "/issue-plans/{plan_id}",
+        "/issue-plans/{plan_id}/regenerate",
+        "/issue-plans/{plan_id}/source",
         "/runs",
         "/runs/auto",
         "/runs/{run_id}",

@@ -15,6 +15,7 @@ function prefillSavedFields() {
     if (savedGithubToken) githubTokenEl.value = savedGithubToken;
   }
   refreshWhoami();
+  refreshPlanSummaries();
 }
 
 async function refreshWhoami() {
@@ -60,6 +61,7 @@ async function swapPage(url, push = true) {
   if (!resp.ok) throw new Error('Could not load this page. Please refresh.');
   var text = await resp.text();
   var doc = new DOMParser().parseFromString(text, 'text/html');
+  stopPlanPolling();
   document.body.innerHTML = doc.body.innerHTML;
   document.title = doc.title;
   if (push) history.pushState({}, '', url);
@@ -96,12 +98,13 @@ async function decide(action) {
   }
 }
 
-async function runAutoInvestigation(issueUrl, scope, statusEl, btn, busyLabel, idleLabel) {
+async function runAutoInvestigation(issueUrl, scope, statusEl, btn, busyLabel, idleLabel, planId) {
   btn.disabled = true;
   btn.textContent = busyLabel;
   statusEl.className = 'feedback working';
   statusEl.textContent = 'Investigation in progress. This usually takes a minute or two. Keep this page open.';
   var body = {issue_url: issueUrl};
+  if (planId) body.plan_id = planId;
   if (scope && scope.length) body.scope = scope;
   try {
     var resp = await fetch('/runs/auto', {
@@ -268,3 +271,273 @@ function filterRuns() {
 }
 window.addEventListener('DOMContentLoaded', prefillSavedFields);
 window.addEventListener('popstate', function () { swapPage(location.pathname, false).catch(function () { location.reload(); }); });
+
+// Each preview owns its request state, so one issue never replaces another's plan.
+var planJobs = new Map();
+var planLookupController;
+var planLookupTimer;
+var planStages = {
+  fetching: 'Fetching issue', preparing: 'Preparing repository',
+  retrieving: 'Finding relevant code', writing: 'Writing plan'
+};
+function stopPlanPolling() {
+  clearTimeout(planLookupTimer);
+  if (planLookupController) planLookupController.abort();
+  planJobs.forEach(function (job) {
+    clearTimeout(job.timer);
+    if (job.controller) job.controller.abort();
+  });
+  planJobs.clear();
+}
+window.addEventListener('pagehide', stopPlanPolling);
+function planElement(tag, text, className) {
+  var el = document.createElement(tag);
+  if (text) el.textContent = text;
+  if (className) el.className = className;
+  return el;
+}
+function planButton(text, action) {
+  var button = planElement('button', text, 'button secondary');
+  button.type = 'button';
+  button.addEventListener('click', action);
+  return button;
+}
+async function planFetch(job, url, options) {
+  job.controller = new AbortController();
+  var response = await fetch(url, Object.assign({}, options || {}, {
+    headers: apiKeyHeader(), signal: job.controller.signal
+  }));
+  var data = await response.json().catch(function () { return {}; });
+  if (!response.ok) {
+    var error = new Error(typeof data.detail === 'string' ? data.detail :
+      'Request failed (' + response.status + '). Check your access key and try again.');
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+function planError(job, message) {
+  if (!job.panel.isConnected) return;
+  job.status.textContent = message;
+  job.status.className = 'feedback error';
+  job.busy = false;
+  renderPlanActions(job);
+}
+function renderPlanActions(job) {
+  job.actions.replaceChildren();
+  if (!job.busy) {
+    job.actions.appendChild(planButton(job.data && job.data.status === 'ready' ? 'Regenerate' : 'Retry',
+      function () { requestPlan(job, true); }));
+  }
+  if (job.data && job.data.result && job.data.status === 'ready' && !job.busy) {
+    var start = planButton('Start investigation →', function () {
+      runAutoInvestigation(job.url, [], job.status, start,
+        'Starting…', 'Start investigation →', job.id);
+    });
+    job.actions.appendChild(start);
+  }
+  job.actions.appendChild(planButton('Collapse', function () {
+    job.row.hidden = true;
+    job.trigger.setAttribute('aria-expanded', 'false');
+    updatePlanIndicator(job.trigger, job.data);
+    job.trigger.focus();
+  }));
+}
+function renderPlanResult(job, data) {
+  job.content.replaceChildren();
+  if (!data.result) return;
+  job.content.appendChild(planElement('p',
+    'AI starting point · Code reviewed at commit ' + (data.commit_sha || '').slice(0, 12), 'eyebrow'));
+  if (data.context_truncated) job.content.appendChild(planElement('p',
+    'Issue or discussion context was shortened to fit the planning budget.', 'plan-note'));
+  job.content.appendChild(planElement('h3', 'Understanding'));
+  job.content.appendChild(planElement('p', data.result.understanding));
+  var references = new Map(data.sources.map(function (source) { return [source.chunk_id, source]; }));
+  function referenceLink(id) {
+    var source = references.get(id);
+    if (!source) return planElement('span', 'Unavailable reference');
+    var link = planElement('a', source.path + ':' + source.line_start + '–' + source.line_end);
+    link.href = '#';
+    link.addEventListener('click', async function (event) {
+      event.preventDefault();
+      var excerpt = job.content.querySelector('.plan-source');
+      if (!excerpt) {
+        excerpt = planElement('pre', '', 'plan-source');
+        excerpt.tabIndex = 0;
+        job.content.appendChild(excerpt);
+      }
+      excerpt.textContent = 'Loading saved source…';
+      try {
+        // Independent request: inspecting source must not cancel status polling.
+        var response = await fetch('/issue-plans/' + job.id + '/source?chunk_id=' +
+          encodeURIComponent(id), {headers: apiKeyHeader()});
+        if (!response.ok) throw new Error('Could not load the saved source.');
+        var detail = await response.json();
+        excerpt.textContent = detail.path + ':' + detail.line_start + '–' + detail.line_end +
+          '\n\n' + detail.content;
+      } catch (error) { excerpt.textContent = error.message; }
+      if (excerpt.isConnected) excerpt.focus();
+    });
+    return link;
+  }
+  job.content.appendChild(planElement('h3', 'Suggested approach'));
+  var steps = planElement('ol');
+  data.result.steps.forEach(function (step) {
+    var item = planElement('li', step.text);
+    step.references.forEach(function (id) { item.append(' ', referenceLink(id)); });
+    steps.appendChild(item);
+  });
+  job.content.appendChild(steps);
+  job.content.appendChild(planElement('h3', 'Relevant code'));
+  var sources = planElement('ul');
+  data.sources.forEach(function (source) {
+    var item = planElement('li'); item.appendChild(referenceLink(source.chunk_id)); sources.appendChild(item);
+  });
+  if (!data.sources.length) sources.appendChild(planElement('li', 'No relevant code evidence found.'));
+  job.content.appendChild(sources);
+  [['How to verify', data.result.verification], ['Open questions', data.result.open_questions]].forEach(function (group) {
+    job.content.appendChild(planElement('h3', group[0]));
+    var list = planElement('ul');
+    group[1].forEach(function (text) { list.appendChild(planElement('li', text)); });
+    if (!group[1].length) list.appendChild(planElement('li', 'None identified in this preliminary plan.'));
+    job.content.appendChild(list);
+  });
+  job.content.appendChild(planElement('p', 'Suggested checks have not been executed.', 'plan-note'));
+}
+async function pollPlan(job) {
+  if (!job.panel.isConnected) return;
+  try {
+    var data = await planFetch(job, '/issue-plans/' + job.id);
+    if (!job.panel.isConnected) return;
+    job.data = data;
+    updatePlanIndicator(job.trigger, data);
+    job.busy = Boolean(planStages[data.status]);
+    job.status.textContent = planStages[data.status] ? planStages[data.status] + '…' :
+      data.error || 'Plan ready for brainstorming.';
+    job.status.className = 'feedback' + (data.error ? ' error' : job.busy ? ' working' : '');
+    renderPlanResult(job, data);
+    renderPlanActions(job);
+    if (job.busy) job.timer = setTimeout(function () { pollPlan(job); }, 2000);
+  } catch (error) {
+    if (error.status === 429 && job.panel.isConnected) {
+      job.status.textContent = 'Waiting for the request limit to reset…';
+      job.timer = setTimeout(function () { pollPlan(job); }, 10000);
+    } else if (error.name !== 'AbortError') {
+      if (error.status === 404) {
+        job.id = null;
+        job.data = null;
+        updatePlanIndicator(job.trigger, null);
+      }
+      planError(job, error.message);
+    }
+  }
+}
+async function requestPlan(job, regenerate) {
+  if (job.busy) return;
+  clearTimeout(job.timer);
+  job.busy = true;
+  job.status.textContent = 'Requesting resolution plan…';
+  job.status.className = 'feedback working';
+  renderPlanActions(job);
+  try {
+    var url = regenerate && job.id ? '/issue-plans/' + job.id + '/regenerate' : '/issue-plans';
+    var data = await planFetch(job, url, {method: 'POST', body: JSON.stringify({
+      issue_url: job.url, request_id: job.requestId
+    })});
+    job.id = data.plan_id;
+    await pollPlan(job);
+  } catch (error) { if (error.name !== 'AbortError') planError(job, error.message); }
+}
+document.addEventListener('click', function (event) {
+  var trigger = event.target.closest('.plan-issue-btn');
+  if (!trigger) return;
+  var row = document.getElementById(trigger.getAttribute('aria-controls'));
+  var panel = row.querySelector('.plan-preview');
+  var job = planJobs.get(row.id);
+  row.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+
+  if (!job) {
+    var status = planElement('p', '', 'feedback');
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    job = {row: row, panel: panel, trigger: trigger, url: trigger.dataset.issueUrl,
+      requestId: Array.from(crypto.getRandomValues(new Uint8Array(16)), function (n) {
+        return n.toString(16).padStart(2, '0');
+      }).join(''), status: status, content: planElement('div'),
+      actions: planElement('div', '', 'plan-actions'), busy: false};
+    panel.append(job.status, job.content, job.actions);
+    planJobs.set(row.id, job);
+    if (trigger.dataset.planId) {
+      job.id = trigger.dataset.planId;
+      job.busy = true;
+      job.status.textContent = 'Loading saved plan…';
+      pollPlan(job);
+    } else requestPlan(job, false);
+  }
+});
+
+
+function updatePlanIndicator(trigger, data) {
+  var indicator = trigger.parentElement.querySelector('.plan-indicator');
+  var active = data && Boolean(planStages[data.status]);
+  var hasResult = data && (data.has_result || data.result);
+  trigger.dataset.planId = data ? data.plan_id : '';
+  trigger.textContent = active ? 'View progress' : hasResult ? 'View plan' :
+    data ? 'View plan status' : 'Show resolution plan';
+  if (indicator) {
+    indicator.textContent = active ? (hasResult ? 'Updating plan' : 'Plan in progress') :
+      hasResult ? (data.status === 'ready' ? 'Plan ready' : 'Saved plan · retry failed update') :
+      data ? (data.status === 'interrupted' ? 'Plan interrupted' : 'Plan failed') : 'No plan yet';
+    indicator.className = 'badge plan-indicator ' + (hasResult && !active ? 'success' : 'neutral');
+  }
+}
+async function refreshPlanSummaries() {
+  clearTimeout(planLookupTimer);
+  if (planLookupController) planLookupController.abort();
+  var triggers = Array.from(document.querySelectorAll('.plan-issue-btn'));
+  if (!triggers.length) return;
+  var controller = new AbortController();
+  planLookupController = controller;
+  var query = new URLSearchParams();
+  triggers.forEach(function (trigger) { query.append('issue_url', trigger.dataset.issueUrl); });
+  try {
+    var response = await fetch('/issue-plans?' + query.toString(), {
+      headers: apiKeyHeader(), signal: controller.signal
+    });
+    if (!response.ok) throw new Error('Could not check saved plans');
+    var summaries = await response.json();
+    if (controller.signal.aborted) return;
+    var byIssue = new Map(summaries.map(function (data) { return [data.issue_url.toLowerCase(), data]; }));
+    var pending = false;
+    triggers.forEach(function (trigger) {
+      if (!trigger.isConnected) return;
+      var data = byIssue.get(trigger.dataset.issueUrl.toLowerCase());
+      var job = planJobs.get(trigger.getAttribute('aria-controls'));
+      if (!job) updatePlanIndicator(trigger, data);
+      if (data && planStages[data.status]) pending = true;
+    });
+    if (pending) planLookupTimer = setTimeout(refreshPlanSummaries, 5000);
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    triggers.forEach(function (trigger) {
+      if (!trigger.isConnected) return;
+      var indicator = trigger.parentElement.querySelector('.plan-indicator');
+      if (indicator) indicator.textContent = 'Saved plan status unavailable';
+    });
+    planLookupTimer = setTimeout(refreshPlanSummaries, 10000);
+  }
+}
+
+function resetPlanAccess() {
+  apiKeyHeader();
+  stopPlanPolling();
+  document.querySelectorAll('.plan-row').forEach(function (row) {
+    row.hidden = true;
+    row.querySelector('.plan-preview').replaceChildren();
+  });
+  document.querySelectorAll('.plan-issue-btn').forEach(function (trigger) {
+    trigger.setAttribute('aria-expanded', 'false');
+    delete trigger.dataset.planId;
+  });
+  refreshPlanSummaries();
+}

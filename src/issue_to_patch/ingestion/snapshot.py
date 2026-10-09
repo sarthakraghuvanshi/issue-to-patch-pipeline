@@ -25,6 +25,8 @@ def create_snapshot(
     *,
     ref: str | None = None,
     repo_name: str | None = None,
+    shallow: bool = False,
+    timeout_seconds: float | None = None,
 ) -> RepositorySnapshot:
     """Clone ``source`` into ``dest_dir/repo`` and return a :class:`RepositorySnapshot`.
 
@@ -43,12 +45,18 @@ def create_snapshot(
 
     git = SafeGit(root=dest_dir)
     clone_src = str(local) if local is not None else source
+    clone_options = ["--no-local" if local is None or shallow else "--local"]
+    if shallow:
+        clone_options.extend(["--depth", "1", "--single-branch", "--no-tags"])
+        if ref:
+            clone_options.extend(["--branch", ref])
     git.run(
         "clone",
-        "--no-local" if local is None else "--local",
+        *clone_options,
         clone_src,
         "repo",
         allow_external_paths=True,
+        timeout_seconds=timeout_seconds,
     )
     git.go_offline()
 

@@ -44,6 +44,12 @@ and emits a **validated `.patch` file**. Every run ends in exactly one of
       never implied by approval — push that branch to a remote you own
       (`ITP_PUSH_REMOTE_URL`; never the repo the issue came from, never upstream).
 
+## Preview a resolution plan
+
+Browse a GitHub repository’s open issues and click **Show resolution plan** for a short,
+code-informed brainstorming preview. Inspect saved source references, regenerate, or start
+an investigation using the same repository version. [Workflow and API details](docs/issue-plans.md).
+
 ## Quickstart
 
 ```bash

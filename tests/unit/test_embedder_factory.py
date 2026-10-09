@@ -55,3 +55,4 @@ def test_a_configured_embedding_model_is_respected() -> None:
     embedder = get_embedder(settings)
     assert isinstance(embedder, OpenAIEmbedder)
     assert embedder.model == "text-embedding-3-large"
+    assert embedder.dim == 3072

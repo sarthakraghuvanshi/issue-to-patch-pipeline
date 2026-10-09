@@ -102,6 +102,8 @@ class EvaluationReport(BaseModel):
 class InvestigationState(TypedDict, total=False):
     run_id: str
     issue_ref: str
+    plan_issue_text: str
+    provisional_plan: str
     allowed_scope: list[str]
 
     issue: IssueRequest | None

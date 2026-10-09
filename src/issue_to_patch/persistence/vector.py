@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+import tiktoken
 from openai import OpenAI
 
 DEFAULT_DIM = 256
@@ -31,6 +32,8 @@ _OPENAI_EMBEDDING_DIM = 1536
 # a large repo's indexing to a handful of requests instead of one per chunk,
 # without risking a single oversized request.
 _OPENAI_BATCH_SIZE = 100
+_OPENAI_INPUT_TOKENS = 8000
+_OPENAI_BATCH_TOKENS = 250_000
 
 # A plain tokeniser — the code-aware one lives in retrieval/ and must not be
 # imported here (persistence is a lower layer). Splits words and camelCase.
@@ -86,23 +89,71 @@ class OpenAIEmbedder:
     api_key: str
     model: str = "text-embedding-3-small"
     client: OpenAI | None = None  # injectable, so tests never touch the network
-    dim: int = _OPENAI_EMBEDDING_DIM
+    dim: int = field(init=False, default=_OPENAI_EMBEDDING_DIM)
 
     _client: OpenAI = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.dim = 3072 if self.model == "text-embedding-3-large" else _OPENAI_EMBEDDING_DIM
         self._client = self.client or OpenAI(api_key=self.api_key)
 
     def embed(self, text: str) -> list[float]:
         return self.embed_batch([text])[0]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        out: list[list[float]] = []
-        for start in range(0, len(texts), _OPENAI_BATCH_SIZE):
-            batch = texts[start : start + _OPENAI_BATCH_SIZE]
+        if not texts:
+            return []
+        try:
+            encoding = tiktoken.encoding_for_model(self.model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        # Keep full code excerpts in storage. Only the embedding transport is
+        # split; pool segments back into one vector per original chunk.
+        vectors: list[list[float]] = [[] for _ in texts]
+        segments = [0] * len(texts)
+        weights = [0] * len(texts)
+        batch: list[list[int]] = []
+        owners: list[int] = []
+        batch_tokens = 0
+
+        def flush() -> None:
             response = self._client.embeddings.create(model=self.model, input=batch)
-            out.extend(d.embedding for d in response.data)
-        return out
+            ordered = sorted(response.data, key=lambda item: item.index)
+            if len(ordered) != len(batch):
+                raise ValueError("Embedding provider returned an incomplete batch.")
+            for owner, tokens, item in zip(owners, batch, ordered, strict=True):
+                weight = len(tokens)
+                if not vectors[owner]:
+                    vectors[owner] = [value * weight for value in item.embedding]
+                else:
+                    vectors[owner] = [
+                        old + value * weight
+                        for old, value in zip(vectors[owner], item.embedding, strict=True)
+                    ]
+                weights[owner] += weight
+                segments[owner] += 1
+            batch.clear()
+            owners.clear()
+
+        for owner, text in enumerate(texts):
+            tokens = encoding.encode(text, disallowed_special=()) or encoding.encode(" ")
+            for offset in range(0, len(tokens), _OPENAI_INPUT_TOKENS):
+                part = tokens[offset : offset + _OPENAI_INPUT_TOKENS]
+                if batch and (
+                    len(batch) >= _OPENAI_BATCH_SIZE
+                    or batch_tokens + len(part) > _OPENAI_BATCH_TOKENS
+                ):
+                    flush()
+                    batch_tokens = 0
+                batch.append(part)
+                owners.append(owner)
+                batch_tokens += len(part)
+        if batch:
+            flush()
+        return [
+            _l2_normalize(vector) if count > 1 else [value / weight for value in vector]
+            for vector, count, weight in zip(vectors, segments, weights, strict=True)
+        ]
 
 
 def cosine(a: list[float], b: list[float]) -> float:

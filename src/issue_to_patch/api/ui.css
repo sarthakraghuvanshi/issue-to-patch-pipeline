@@ -702,3 +702,29 @@ button, input, select, textarea, summary { outline-offset: 3px; }
   .editor-label { flex-wrap: wrap; gap: 0; margin-bottom: 8px; }
   .issue-reference { padding: 16px; }
 }
+.issue-actions, .plan-actions, .issue-pagination { display: flex; flex-wrap: wrap; gap: 8px; }
+.issue-pagination { padding: 16px 24px; justify-content: space-between; border-top: 1px solid var(--line); }
+.plan-row > td { padding: 0 24px 24px; }
+.plan-preview { border: 1px solid #cfe3dc; border-radius: 8px; background: #f8fbfa; padding: 24px; white-space: normal; }
+.plan-preview p, .plan-preview li { max-width: 90ch; overflow-wrap: anywhere; }
+.plan-preview h3 { margin-top: 20px; }
+.plan-preview li { margin: 8px 0; }
+.plan-preview a { text-decoration: underline; }
+.plan-actions { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.plan-note { font-size: 12px; }
+.plan-source { white-space: pre-wrap; overflow-wrap: anywhere; background: white; border: 1px solid var(--line); padding: 16px; max-height: 360px; overflow: auto; }
+@media (max-width: 760px) { .plan-row > td { padding: 0 8px 16px; } .plan-preview { padding: 16px; } .issue-actions { min-width: 160px; } }
+@media (max-width: 760px) {
+  .issue-table, .issue-table tbody { display: block; width: 100%; }
+  .issue-table thead { display: none; }
+  .issue-table tr:not(.plan-row) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 16px; gap: 8px; border-top: 1px solid var(--line); }
+  .issue-table tr:not(.plan-row) > td { padding: 0; border: 0; min-width: 0; }
+  .issue-table tr:not(.plan-row) > td:first-child,
+  .issue-table tr:not(.plan-row) > td:last-child { grid-column: 1 / -1; }
+  .issue-table .issue-actions { min-width: 0; margin-top: 8px; }
+  .issue-table .plan-row, .issue-table .plan-row > td { display: block; width: 100%; }
+  .issue-table .plan-row > td { padding: 0 8px 16px; }
+  .plan-preview { min-width: 0; }
+}
+.plan-access { margin: 0; width: min(280px, 100%); }
+.plan-access label { margin-top: 8px; }

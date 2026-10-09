@@ -48,11 +48,22 @@ class RetrievalService:
     # -- indexing --------------------------------------------------
     def ensure_embeddings(self, repository: str, commit_sha: str) -> int:
         rows = self._store.list_chunks(repository, commit_sha)
-        missing = {r.chunk_id: self._embed_row(r) for r in rows if not r.embedding}
-        if missing:
-            self._store.set_embeddings(missing)
-            self._cache.pop((repository, commit_sha), None)
-        return len(missing)
+        stale = [r for r in rows if not r.embedding or len(r.embedding) != self._embedder.dim]
+        if not stale:
+            return 0
+        vectors = self._embedder.embed_batch(
+            [
+                "\n".join([r.path, r.symbol or "", r.summary, " ".join(r.keywords), r.content])
+                for r in stale
+            ]
+        )
+        if len(vectors) != len(stale) or any(len(v) != self._embedder.dim for v in vectors):
+            raise ValueError("Embedding provider returned incompatible vectors.")
+        # Commit only after the complete rebuild succeeds. A quota/network
+        # failure keeps the previous index intact and never mixes dimensions.
+        self._store.set_embeddings({r.chunk_id: v for r, v in zip(stale, vectors, strict=True)})
+        self._cache.pop((repository, commit_sha), None)
+        return len(stale)
 
     def _load(self, repository: str, commit_sha: str) -> _RepoIndex:
         key = (repository, commit_sha)
@@ -61,6 +72,10 @@ class RetrievalService:
         rows = self._store.list_chunks(repository, commit_sha)
         if not rows:
             raise LookupError(f"no chunks indexed for {repository}@{commit_sha[:12]}")
+
+        if any(not r.embedding or len(r.embedding) != self._embedder.dim for r in rows):
+            self.ensure_embeddings(repository, commit_sha)
+            rows = self._store.list_chunks(repository, commit_sha)
 
         bm25 = BM25Index()
         vectors: dict[str, list[float]] = {}

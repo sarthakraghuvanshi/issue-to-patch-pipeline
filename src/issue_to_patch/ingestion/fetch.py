@@ -88,3 +88,87 @@ async def collect_related_changes(
                 )
             )
     return related
+
+
+async def list_issue_page(
+    client: GitHubClient, repo: str, cursor: str | None = None
+) -> tuple[list[GitHubIssue], str | None, str | None]:
+    """A fixed-size cursor tracks GitHub page/offset without an ever-growing history."""
+    import base64
+    import json
+    from typing import Any
+
+    def encode(page: int, offset: int) -> str:
+        return base64.urlsafe_b64encode(json.dumps([page, offset]).encode()).decode()
+
+    try:
+        if cursor and len(cursor) > 128:
+            raise ValueError("Cursor too long")
+        decoded = json.loads(base64.urlsafe_b64decode(cursor)) if cursor else [1, 0]
+        if (
+            not isinstance(decoded, list)
+            or len(decoded) != 2
+            or any(type(n) is not int for n in decoded)
+            or decoded[0] < 1
+            or not 0 <= decoded[1] < 100
+        ):
+            raise ValueError("Invalid cursor")
+        page, offset = int(decoded[0]), int(decoded[1])
+    except Exception as exc:
+        raise ValueError("Invalid issue page cursor.") from exc
+
+    cache: dict[int, tuple[list[dict[str, Any]], bool]] = {}
+
+    async def fetch(number: int) -> tuple[list[dict[str, Any]], bool]:
+        if number not in cache:
+            cache[number] = await client.get_page(
+                f"/repos/{repo}/issues",
+                params={
+                    "state": "open",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "per_page": 100,
+                    "page": number,
+                },
+            )
+        return cache[number]
+
+    previous = None
+    back_page, back_offset = page, offset
+    found = 0
+    for _ in range(20):
+        if back_offset == 0:
+            back_page -= 1
+            back_offset = 100
+        if back_page < 1:
+            break
+        entries, _more = await fetch(back_page)
+        for index in range(min(back_offset, len(entries)) - 1, -1, -1):
+            if "pull_request" not in entries[index]:
+                previous = encode(back_page, index)
+                found += 1
+                if found == 30:
+                    break
+        if found == 30:
+            break
+        back_offset = 0
+    else:
+        # A very PR-heavy stretch can be traversed without unbounded requests.
+        previous = encode(back_page, 0)
+
+    issues: list[GitHubIssue] = []
+    for _ in range(20):
+        payload, more = await fetch(page)
+        while offset < len(payload):
+            item = payload[offset]
+            offset += 1
+            if "pull_request" not in item:
+                issues.append(GitHubIssue.from_api(item))
+            if len(issues) == 30:
+                if offset < len(payload):
+                    return issues, encode(page, offset), previous
+                return issues, encode(page + 1, 0) if more else None, previous
+        if not more:
+            return issues, None, previous
+        page, offset = page + 1, 0
+    return issues, encode(page, offset), previous

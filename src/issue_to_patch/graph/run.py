@@ -44,6 +44,8 @@ def start_investigation(
     issue_ref: str,
     repository: RepositorySnapshot,
     deps: GraphDependencies,
+    provisional_plan: str | None = None,
+    plan_issue_text: str | None = None,
     allowed_scope: list[str] | None = None,
     run_id: str | None = None,
     checkpointer: BaseCheckpointSaver[str] | None = None,
@@ -59,6 +61,10 @@ def start_investigation(
     graph = build_graph(deps, checkpointer=checkpointer)
     initial = new_state(run_id=run_id, issue_ref=issue_ref, allowed_scope=allowed_scope)
     initial["repository"] = repository
+    if plan_issue_text:
+        initial["plan_issue_text"] = plan_issue_text
+    if provisional_plan:
+        initial["provisional_plan"] = provisional_plan
 
     deps.store.create_run(
         run_id=run_id,

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -29,7 +30,7 @@ from issue_to_patch.api.diff_render import render_diff_html
 from issue_to_patch.graph import UnknownRun, load_investigation
 from issue_to_patch.graph.state import InvestigationState
 from issue_to_patch.ingestion import GitHubAPIError, GitHubClient, GitHubNotFound
-from issue_to_patch.ingestion.fetch import list_open_issues
+from issue_to_patch.ingestion.fetch import list_issue_page
 from issue_to_patch.ingestion.github_models import GitHubIssue
 from issue_to_patch.patching.models import ValidationReport
 from issue_to_patch.patching.push import parse_github_owner_repo
@@ -172,12 +173,21 @@ def resolve_repo_issues(repo: str) -> HTMLResponse | RedirectResponse:
 
 
 @ui_router.get("/repos/{owner}/{repo}/issues", response_class=HTMLResponse)
-async def list_repo_issues_page(owner: str, repo: str, settings: SettingsDep) -> HTMLResponse:
+async def list_repo_issues_page(
+    owner: str, repo: str, settings: SettingsDep, cursor: str | None = None
+) -> HTMLResponse:
     full_name = f"{owner}/{repo}"
     token = settings.github_token.get_secret_value() if settings.github_token else None
     try:
         async with GitHubClient(token=token, base_url=settings.github_api_base) as client:
-            issues = await list_open_issues(client, full_name)
+            issues, next_cursor, previous_cursor = await list_issue_page(client, full_name, cursor)
+    except ValueError:
+        return _page(
+            "Invalid page",
+            _repo_issues_error(
+                full_name, "Invalid page cursor. Return to the repository to start again."
+            ),
+        )
     except GitHubNotFound:
         return _page(
             f"{full_name} issues",
@@ -193,20 +203,32 @@ async def list_repo_issues_page(owner: str, repo: str, settings: SettingsDep) ->
         f"<h1>{html.escape(full_name)}</h1>"
         "<p>Open issues, most recently updated first. Pick one to investigate.</p></div></div>"
         "<section class='panel history'><div class='section-heading'><div>"
-        f"<h2>Open issues <span class='count'>{len(issues)}</span></h2></div></div>"
+        f"<h2>Open issues <span class='count'>{len(issues)} on this page</span></h2></div>"
+        "<details class='plan-access'><summary>Workspace access</summary>"
+        "<label for='api-key'>Workspace API key</label>"
+        "<input id='api-key' type='password' autocomplete='off' "
+        "onchange='resetPlanAccess()' placeholder='Optional for local use'>"
+        "</details></div>"
         "<p id='repo-issues-status' class='feedback' role='status' aria-live='polite'></p>"
     )
     if issues:
         body += (
-            "<div class='table-scroll'><table><thead><tr><th>Issue</th><th>Labels</th>"
+            "<div class='table-scroll'><table class='issue-table'><thead><tr>"
+            "<th>Issue</th><th>Labels</th>"
             "<th>Updated</th><th><span class='sr-only'>Run</span></th></tr></thead>"
             f"<tbody>{rows}</tbody></table></div>"
         )
     else:
         body += (
             "<div class='empty-state'><div class='empty-icon'>⌘</div>"
-            "<h3>No open issues</h3><p>This repository has no open issues right now.</p></div>"
+            "<h3>No open issues on this page</h3><p>Use Next if more pages are available.</p></div>"
         )
+    body += "<nav class='issue-pagination' aria-label='Issue pages'>"
+    for label, page_cursor in (("Previous", previous_cursor), ("Next", next_cursor)):
+        if page_cursor:
+            query = html.escape(urlencode({"cursor": page_cursor}))
+            body += f"<a class='button secondary' href='?{query}'>{label}</a>"
+    body += "</nav>"
     body += "</section>"
     return _page(f"{full_name} issues", body)
 
@@ -231,8 +253,14 @@ def _issue_row(issue: GitHubIssue) -> str:
         f"#{issue.number} {html.escape(issue.title)}</a>"
         f"<small class='run-id'>by {html.escape(issue.author)}</small></td>"
         f"<td>{labels}</td><td><time>{html.escape(updated)}</time></td>"
-        "<td><button class='button secondary run-issue-btn' "
-        f"data-issue-url='{html.escape(issue.html_url)}'>Run →</button></td></tr>"
+        "<td><div class='issue-actions'><button class='button secondary plan-issue-btn' "
+        f"data-issue-url='{html.escape(issue.html_url)}' aria-expanded='false' "
+        f"aria-controls='plan-{issue.number}'>Show resolution plan</button>"
+        "<span class='badge neutral plan-indicator' role='status'>Checking saved plans…</span>"
+        "<button class='button secondary run-issue-btn' "
+        f"data-issue-url='{html.escape(issue.html_url)}'>Run →</button></div></td></tr>"
+        f"<tr id='plan-{issue.number}' class='plan-row' hidden><td colspan='4'>"
+        "<section class='plan-preview' aria-label='Resolution plan'></section></td></tr>"
     )
 
 
@@ -302,7 +330,13 @@ def run_detail_page(run_id: str, deps: GraphDepsDep, checkpointer: CheckpointerD
         )
         if final_state is RunState.PATCH_VALIDATED:
             snapshot = state.get("repository")
-            branch_dir = branch_target(run_id, snapshot)[0] if snapshot is not None else None
+            branch_dir = (
+                branch_target(
+                    run_id, snapshot, shared_snapshot=bool(state.get("provisional_plan"))
+                )[0]
+                if snapshot is not None
+                else None
+            )
             sections.append(_token_section())
             sections.append(_build_push_section(branch_dir))
             if branch_dir is not None and branch_dir.exists():

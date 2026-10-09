@@ -94,7 +94,7 @@ def test_empty_patch_renders_a_placeholder_without_crashing() -> None:
 
 
 def test_highlights_changed_tokens_across_reformatted_json() -> None:
-    patch = '''diff --git a/data.json b/data.json
+    patch = """diff --git a/data.json b/data.json
 --- a/data.json
 +++ b/data.json
 @@ -1,3 +1 @@
@@ -102,49 +102,52 @@ def test_highlights_changed_tokens_across_reformatted_json() -> None:
 -  "body": "old value"
 -}
 +{"body":"new value"}
-'''
+"""
     out = render_diff_html(patch)
-    assert '<mark>old</mark>' in out
-    assert '<mark>new</mark>' in out
-    assert '+1 added' in out
-    assert '&minus;3 removed' in out
-    assert 'white-space: pre-wrap' in out
+    assert "<mark>old</mark>" in out
+    assert "<mark>new</mark>" in out
+    assert "+1 added" in out
+    assert "&minus;3 removed" in out
+    assert "white-space: pre-wrap" in out
 
 
 def test_multiple_files_have_navigation_and_collapsible_sections() -> None:
-    out = render_diff_html(_SIMPLE_DIFF + '''
+    out = render_diff_html(
+        _SIMPLE_DIFF
+        + """
 diff --git a/other.py b/other.py
 --- a/other.py
 +++ b/other.py
 @@ -10 +10 @@
 -before
 +after
-''')
-    assert '2 changed files' in out
+"""
+    )
+    assert "2 changed files" in out
     assert "href='#diff-file-0'" in out
     assert "href='#diff-file-1'" in out
     assert "id='diff-file-1'" in out
-    assert out.count('<details open>') == 2
-    assert '@@ -10 +10 @@' in out
+    assert out.count("<details open>") == 2
+    assert "@@ -10 +10 @@" in out
     assert "<td class='ln del'>10</td>" in out
 
 
 def test_content_starting_with_diff_header_characters_is_preserved() -> None:
-    out = render_diff_html('''diff --git a/x.txt b/x.txt
+    out = render_diff_html("""diff --git a/x.txt b/x.txt
 --- a/x.txt
 +++ b/x.txt
 @@ -1 +1 @@
 --- content
 +++ replacement
-''')
-    assert '-- content' in out
-    assert '++ replacement' in out
-    assert '+1 added' in out
-    assert '&minus;1 removed' in out
+""")
+    assert "-- content" in out
+    assert "++ replacement" in out
+    assert "+1 added" in out
+    assert "&minus;1 removed" in out
 
 
 def test_split_view_pairs_replacements_and_pads_unmatched_lines() -> None:
-    out = render_diff_html('''diff --git a/x.py b/x.py
+    out = render_diff_html("""diff --git a/x.py b/x.py
 --- a/x.py
 +++ b/x.py
 @@ -1,3 +1,2 @@
@@ -152,27 +155,27 @@ def test_split_view_pairs_replacements_and_pads_unmatched_lines() -> None:
 -old second
 +new first
  unchanged
-''')
-    assert 'Current version</th>' in out
-    assert 'Modified version</th>' in out
+""")
+    assert "Current version</th>" in out
+    assert "Modified version</th>" in out
     rows = out.split("<tr class='change'>")[1:]
-    first = rows[0].split('</tr>')[0]
+    first = rows[0].split("</tr>")[0]
     assert "class='code del'" in first and "class='code add'" in first
-    assert first.index('old first') < first.index('new first')
-    second = rows[1].split('</tr>')[0]
-    assert 'old second' in second
+    assert first.index("old first") < first.index("new first")
+    second = rows[1].split("</tr>")[0]
+    assert "old second" in second
     assert "class='code blank'" in second
     assert "<td class='ln ctx'>3</td>" in out
     assert "<td class='ln ctx'>2</td>" in out
 
 
 def test_split_view_insertion_has_empty_current_side() -> None:
-    out = render_diff_html('''diff --git a/new.py b/new.py
+    out = render_diff_html("""diff --git a/new.py b/new.py
 --- /dev/null
 +++ b/new.py
 @@ -0,0 +1 @@
 +hello
-''')
-    row = out.split("<tr class='change'>")[1].split('</tr>')[0]
+""")
+    row = out.split("<tr class='change'>")[1].split("</tr>")[0]
     assert row.startswith("<td class='ln blank'></td><td class='code blank'></td>")
     assert "<td class='ln add'>1</td>" in row

@@ -102,3 +102,32 @@ def test_eval_harness_reports_metrics_per_mode(indexed) -> None:
     bm25 = next(m for m in report.per_mode if m.mode is RetrievalMode.BM25)
     assert bm25.file_recall_at[5] == 1.0
     assert 0.0 <= bm25.mrr <= 1.0
+
+
+def test_switching_embedding_dimensions_rebuilds_saved_vectors(indexed) -> None:
+    from issue_to_patch.persistence.vector import HashingEmbedder
+
+    store, snap = indexed
+    assert {len(r.embedding) for r in store.list_chunks(snap.repo, snap.commit_sha)} == {256}
+    service = RetrievalService(store, embedder=HashingEmbedder(dim=128))
+    trace = service.search("parser whitespace", _filters(snap))
+    assert trace.results
+    assert {len(r.embedding) for r in store.list_chunks(snap.repo, snap.commit_sha)} == {128}
+    assert service.ensure_embeddings(snap.repo, snap.commit_sha) == 0
+
+
+def test_failed_embedding_switch_keeps_old_index_and_stops_search(indexed) -> None:
+    from issue_to_patch.persistence.vector import HashingEmbedder
+
+    class UnavailableEmbedder(HashingEmbedder):
+        def embed_batch(self, texts):
+            raise RuntimeError("provider unavailable")
+
+    store, snap = indexed
+    before = {r.chunk_id: r.embedding for r in store.list_chunks(snap.repo, snap.commit_sha)}
+    service = RetrievalService(store, embedder=UnavailableEmbedder(dim=128))
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        service.search("parser", _filters(snap))
+    assert {
+        r.chunk_id: r.embedding for r in store.list_chunks(snap.repo, snap.commit_sha)
+    } == before

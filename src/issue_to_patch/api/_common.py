@@ -21,9 +21,13 @@ from issue_to_patch.ingestion.models import RepositorySnapshot
 from issue_to_patch.patching.models import ValidationReport
 
 
-def branch_target(run_id: str, snapshot: RepositorySnapshot) -> tuple[Path, str]:
+def branch_target(
+    run_id: str, snapshot: RepositorySnapshot, *, shared_snapshot: bool = False
+) -> tuple[Path, str]:
     """Same convention the `auto` CLI command uses — a run started via the
     API, the CLI, or the web UI ends up buildable/pushable the same way."""
+    if shared_snapshot:
+        return snapshot.root_path.parent / "branches" / run_id, f"itp/{run_id}"
     return snapshot.root_path.parent / "branch", f"itp/{run_id}"
 
 

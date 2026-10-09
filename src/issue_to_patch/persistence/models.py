@@ -150,3 +150,18 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column()
 
     run: Mapped[Run] = relationship(back_populates="artifacts")
+
+
+class IssuePlanRow(Base):
+    """Saved read-only brainstorming jobs, independent of investigation runs."""
+
+    __tablename__ = "issue_plans"
+    plan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(255))
+    request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    issue_url: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    cost_usd: Mapped[float] = mapped_column(default=0.0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column()
