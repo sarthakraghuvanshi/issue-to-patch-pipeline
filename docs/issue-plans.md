@@ -14,13 +14,14 @@ Inputs are bounded to 12,000 issue characters, 20 recent comments within 12,000 
 
 Plans and model costs are saved separately from investigation run history. The model cost recorded is the configured LLM client's accounting, not an inclusive billing statement for embedding or GitHub services. Snapshots and excerpts are retained for later inspection. Deleting their files makes plan handoff unavailable; it will not silently download a different commit.
 
-Background work uses FastAPI's in-process tasks, matching the current automatic-run architecture. **Run one API worker**: startup marks unfinished plan jobs interrupted so they can be retried. This is not a distributed task queue and does not automatically resume work across restarts. Completed previews survive restart in the database; the current page holds their plan IDs while open. No automatic plan-list/history screen is introduced.
+Background work uses FastAPI's in-process tasks, matching the current automatic-run architecture. **Run one API worker**: startup marks unfinished plan jobs interrupted so they can be retried. This is not a distributed task queue and does not automatically resume work across restarts. Completed previews survive restart in the database. The issue browser looks up saved plans for the current user when it loads, so reopening a preview does not generate a new plan. There is no separate plan-history screen.
 
 ## API
 
-All four endpoints use the application's authentication and rate limiting:
+All plan endpoints use the application's authentication and rate limiting:
 
-- `POST /issue-plans`: `{ "issue_url": "https://github.com/owner/repo/issues/123", "request_id": "unique-client-request-id" }` → `202 { "plan_id": "…" }`. The request ID is optional; sending one makes repeated submissions idempotent. Repeating the same request ID/issue returns the same job.
+- `GET /issue-plans?issue_url=owner/repo%231`: saved-plan summaries for the current user; repeat `issue_url` for up to 30 issues.
+- `POST /issue-plans`: `{ "issue_url": "https://github.com/owner/repo/issues/123", "request_id": "unique-client-request-id" }` → `202 { "plan_id": "…" }`. The request ID is optional. Existing plans for the same user and issue are reused even when the request ID changes. Use the regenerate endpoint to request a new answer.
 - `GET /issue-plans/{plan_id}`: status, saved result, source excerpts, pinned commit, truncation flag, recorded model cost, and error.
 - `POST /issue-plans/{plan_id}/regenerate`: restart a finished/failed job against its saved snapshot. An already-running job is reused.
 - `GET /issue-plans/{plan_id}/source?chunk_id=…`: an excerpt from that plan's evidence, never a filesystem path supplied by the caller.

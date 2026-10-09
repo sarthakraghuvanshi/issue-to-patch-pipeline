@@ -1,211 +1,294 @@
-# Issue-to-Patch Automation Pipeline
+# Issue-to-Patch
 
-RAG-based pipeline that ingests a GitHub issue, retrieves relevant repository
-context (BM25 → hybrid), proposes a source change via a stateful reasoning graph,
-and emits a **validated `.patch` file**. Every run ends in exactly one of
-`PATCH_VALIDATED`, `PATCH_REQUIRES_HUMAN_REVIEW`, `PATCH_REJECTED`, or
-`INVESTIGATION_INCONCLUSIVE` — it never silently claims success.
+Turn a GitHub issue into a code-informed resolution plan, then investigate it and
+review a proposed patch—all from a local web app.
 
-- **New to the project?** [How it works, in simple language](docs/project-guide.md)
-- **What / why:** [RAG_LEARNING_PLAN.md](RAG_LEARNING_PLAN.md)
-- **How / order / deploy:** [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
+The app reads the issue and repository, finds relevant code, and uses an AI model
+to suggest an approach. A separate investigation can produce changes across one
+or more files. You review the changes before choosing whether to build a branch,
+push it to your fork, or open a pull request.
 
-## Status
+**A plan is a starting point. A validated patch is not proof that the bug is fixed.**
+The app checks patch application and safety rules; you still need to review the
+code and run the target project's relevant tests.
 
-- [x] Bootstrap (IMPLEMENTATION_PLAN.md §2)
-- [x] Sprint 1 — deterministic issue → validated `.patch`, no LLM, no network
-- [x] Sprint 2 — GitHub ingestion (async client, retries, pagination, ETag cache; raw archive + snapshot)
-- [x] Sprint 3 — structure-aware chunking (tree-sitter) + rule-based metadata; `index` / `show-chunk`
-- [x] Sprint 4 — BM25 + dense (hashing embedder) + hybrid (RRF) retrieval; `search` / `eval-retrieval`
-- [x] Milestone 2 gate — 20 labeled issues over langchain-ai/langchain (3,125 files); hybrid
-      beats BM25 (see [evals/README.md](evals/README.md)) — hybrid stays the default mode
-- [x] Sprint 5 — single-agent LangGraph reasoning engine (12 nodes, deterministic router,
-      human-review gate, real Anthropic + OpenAI providers); `investigate`
-- [x] Sprint 6 — FastAPI service (`POST /runs`, `GET /runs/{id}`, `.../approve`,
-      `.../retrieval`, `.../patch`, `/search`, `/validate-patch`) over a durable
-      (SQLite-file) checkpointer — a run started by one request can be approved by a
-      completely different one, even after a process restart. `make serve`
-- [x] Sprint 7a — human validation roles (Gatekeeper/Auditor/Strategist) + risk
-      classification (only a Gatekeeper can clear a patch touching a risky path) +
-      a tamper-evident audit trail (`audit` CLI command, `GET /runs/{id}/audit`)
-- [x] Sprint 7b — multi-agent system: Issue Analyst, Repository Cartographer,
-      Root-Cause Analyst, Patch Author, Test Strategist, Patch Reviewer — six typed,
-      cited artifacts replacing the single-LLM-call analysis/drafting, behind
-      `ITP_AGENT_MODE=multi`. Same graph, same validation, same human gate either way.
-- [x] Sprint 8 — evaluation: deterministic per-run/suite metrics, a grounded LLM
-      judge (never the sole success signal), `make eval` / `eval-suite` / `judge`.
-      Real cost tracking wired through (`Run.cost_usd` had existed since Sprint 1
-      but nothing filled it in) and the graph now writes its patch/validation to
-      disk like Sprint 1's deterministic pipeline always did.
-- [x] `auto` — one interactive command (ingest → index → investigate → review →
-      build → push) instead of four manual ones. On `PATCH_VALIDATED` it can
-      materialize the patch onto a real, persistent local branch (`git worktree`
-      + `git am` — no new edit-application logic), then — a separate confirmation,
-      never implied by approval — push that branch to a remote you own
-      (`ITP_PUSH_REMOTE_URL`; never the repo the issue came from, never upstream).
+## Start here
 
-## Preview a resolution plan
+- [Install and run](#install-and-run)
+- [Use the web app](#use-the-web-app)
+- [How it works](#how-it-works)
+- [Configuration and API keys](#configuration-and-api-keys)
+- [Troubleshooting](#troubleshooting)
+- [Development commands](#development-commands)
 
-Browse a GitHub repository’s open issues and click **Show resolution plan** for a short,
-code-informed brainstorming preview. Inspect saved source references, regenerate, or start
-an investigation using the same repository version. [Workflow and API details](docs/issue-plans.md).
+## Install and run
 
-## Quickstart
+### 1. Install the project
+
+You need **Git**, **uv**, and **make**. The project uses **Python 3.12**;
+`make install` installs that Python version through uv and installs dependencies.
+The commands below assume a macOS or Linux shell.
 
 ```bash
-make install      # uv sync + Python 3.12
-make check        # ruff + mypy + pytest (offline, fake LLM)
-make migrate      # create the SQLite schema via Alembic
-
-# Sprint 1: fix a bug deterministically from an issue + repo + edit plan
-uv run issue-to-patch run \
-  --issue path/to/issue.json \
-  --repo  path/to/local/repo \
-  --edit-plan path/to/plan.json \
-  --scope 'src/**'
-# exit code: 0 validated · 10 needs-human · 20 rejected · 30 inconclusive
-
-make up           # local infra: postgres+pgvector, redis, langfuse, minio
+git clone https://github.com/sarthakraghuvanshi/issue-to-patch-pipeline.git
+cd issue-to-patch-pipeline
+make install
 ```
 
-An **edit plan** is JSON: `{"message": "...", "edits": [{"path": "...", "old": "...", "new": "..."}]}`.
-`old` must match exactly once; `old: ""` on a missing file creates it.
+Docker, Redis, and PostgreSQL are **not required** for the normal local setup.
+It uses SQLite and files in the `artifacts/` directory.
+
+### 2. Configure the AI models
+
+For a new checkout, create your local settings file:
 
 ```bash
-# Sprint 2: fetch a real GitHub issue + repo into artifacts/<run_id>/
-export ITP_GITHUB_TOKEN=ghp_xxx        # optional; anonymous works within rate limits
-uv run issue-to-patch ingest --issue-url https://github.com/OWNER/REPO/issues/123
-# writes raw/*.json (issue, comments, repo, related changes, snapshot manifest)
-# + snapshot/ pinned to a commit SHA
-
-# Sprint 3: chunk a snapshot into structure-aware pieces + metadata
-uv run issue-to-patch index --snapshot artifacts/<run_id>/snapshot
-uv run issue-to-patch show-chunk <chunk_id> --metadata   # source, byte-identical to the file
-
-# Sprint 4: rank indexed chunks against a bug description
-uv run issue-to-patch search "add() returns the wrong result" \
-  --snapshot artifacts/<run_id>/snapshot --mode hybrid --explain
-uv run issue-to-patch eval-retrieval --labeled evals/labeled_issues.jsonl
-
-# Sprint 5: investigate + draft a patch through the reasoning graph, pause for human review
-export ITP_LLM_PROVIDER=anthropic ITP_LLM_API_KEY=sk-ant-...   # or provider=openai + an OPENAI key
-# (leave ITP_LLM_PROVIDER=fake, the default, for offline/FakeLLM use)
-uv run issue-to-patch investigate --issue "add() returns the wrong result" \
-  --snapshot artifacts/<run_id>/snapshot --scope 'src/**'
-# prints the root-cause hypothesis + its citations, the diff, validation checks,
-# then pauses (exit 10) until you resolve it:
-uv run issue-to-patch investigate --issue "..." --snapshot ... --decision approve
-# --decision is only resumable within the same process/invocation for now — the
-# checkpointer is in-memory; the API (below) uses a durable one instead.
-
-# Sprint 6: the same investigation, over HTTP — a run started here can be approved
-# by a completely separate request (or process), because state lives in a SQLite
-# file, not in memory:
-make serve   # uvicorn on :8000; docs at /docs, contract at /openapi.json
-curl -s localhost:8000/runs -X POST -H 'content-type: application/json' -d '{
-  "issue": "add() returns the wrong result",
-  "snapshot": "artifacts/<run_id>/snapshot",
-  "scope": ["src/**"]
-}'   # -> {"run_id": "...", "status": "AWAITING_HUMAN_REVIEW", "hypothesis": {...}, ...}
-curl -s localhost:8000/runs/<run_id>/approve -X POST -H 'content-type: application/json' \
-  -d '{"decision": "approve"}'
-# set ITP_API_KEY and send `Authorization: Bearer <key>` once this leaves local dev —
-# Settings refuses to start with no key in staging/prod.
-
-# Sprint 7a: a patch touching a risky path (.github/**, secrets, migrations, lockfiles,
-# pyproject.toml, ... see safety/permissions.py) needs the Gatekeeper role specifically —
-# an Auditor's or Strategist's "approve" ends the run PATCH_REQUIRES_HUMAN_REVIEW, not
-# PATCH_VALIDATED:
-uv run issue-to-patch investigate --resume <run_id> --decision approve \
-  --reviewer alice --role gatekeeper
-# every tool call and human decision is append-only and hash-chained; replay + verify it:
-uv run issue-to-patch audit <run_id>          # or GET /runs/{run_id}/audit
-
-# Sprint 7b: the same investigation, but AnalyzeRootCause/DraftPatch run as six
-# specialist agents instead of one LLM call each - same graph, same citations,
-# same validation and human gate:
-export ITP_AGENT_MODE=multi
-uv run issue-to-patch investigate --issue "add() returns the wrong result" \
-  --snapshot artifacts/<run_id>/snapshot --scope 'src/**'
-
-# Sprint 8: evaluation - retrieval metrics from a labeled set, and/or deterministic +
-# judge metrics from runs you already made. make eval reuses evals/labeled_issues.jsonl:
-make eval                                    # -> evals/report.{json,html}
-uv run issue-to-patch eval-suite --run-id <run_id> --run-id <run_id2> --judge
-uv run issue-to-patch judge <run_id>          # score one run on its own
-
-# One interactive command: ingest -> index -> investigate -> review -> build -> push.
-# Give it a URL; it does the mechanical steps itself and shows you the diagnosis + diff
-# right there, then prompts for your decision:
-uv run issue-to-patch auto https://github.com/OWNER/REPO/issues/123 --scope 'src/**'
-# On PATCH_VALIDATED it asks to build the fix onto a real, persistent local branch
-# (ready to inspect/build/test), then — a separate confirmation — asks to push that
-# branch to a remote YOU OWN (never the repo the issue came from):
-export ITP_PUSH_REMOTE_URL=git@github.com:you/your-fork.git   # optional; SSH form preferred
+cp .env.example .env
 ```
 
-> The local `artifacts/dev.db` is disposable. If a sprint changes the schema and an
-> old DB errors with `no such column`, run `make reset-db` and re-index (or
-> `make migrate` if you know the DB is only one revision behind).
+If you already have a `.env`, edit that file instead of replacing it.
+For OpenAI, set these values inside `.env`:
 
-## Layout
+```dotenv
+ITP_LLM_PROVIDER=openai
+ITP_OPENAI_API_KEY=your-openai-api-key
+ITP_LLM_MODEL=gpt-5
+ITP_EMBEDDING_MODEL=text-embedding-3-large
+```
 
-| Path | Role |
-|---|---|
-| `src/issue_to_patch/config/` | `Settings` (env-driven, fails fast) |
-| `src/issue_to_patch/llm/` | the only seam to a language model; `FakeLLM` for tests, `AnthropicLLM`/`OpenAILLM` for real |
-| `src/issue_to_patch/ingestion/` | Data Sources: GitHub client, issue normalization, snapshots |
-| `src/issue_to_patch/processing/` | parsing, structure analysis, structure-aware chunking, metadata |
-| `src/issue_to_patch/retrieval/` | BM25, embeddings, hybrid ranking |
-| `src/issue_to_patch/graph/` | LangGraph reasoning engine + deterministic router |
-| `src/issue_to_patch/agents/` | the six specialists (`ITP_AGENT_MODE=multi`), each a typed, cited artifact |
-| `src/issue_to_patch/patching/` | worktree edits, `git format-patch`, deterministic validation |
-| `src/issue_to_patch/evaluation/` | deterministic per-run/suite metrics, the grounded LLM judge, the combined `SuiteReport` (JSON + HTML) |
-| `src/issue_to_patch/safety/` | allowlists, sandbox, stress tests |
-| `src/issue_to_patch/persistence/` | SQL / vector / object-storage adapters; `audit.py` replays + verifies a run's hash-chained tool-call and human-decision trail |
-| `src/issue_to_patch/api/` | FastAPI: schemas, thin routes, auth + rate-limit deps; `openapi.json` committed at repo root (`make openapi` to regenerate, checked by a contract test) |
+The planning model writes the explanation and proposed changes. The embedding
+model helps search the repository for relevant code. They are separate settings.
+Real model calls require an API account with available credits or quota.
 
-## Configuration
+The example file starts with `ITP_LLM_PROVIDER=fake`. That is for automated tests,
+not for generating real plans from arbitrary GitHub issues. See the
+[offline demo](#try-the-offline-demo) if you want to explore without API calls.
 
-Copy `.env.example` to `.env`. All variables are prefixed `ITP_`.
+Keep `.env` private; it is excluded from Git. Avoid setting both a generic
+`ITP_LLM_API_KEY` and a provider-specific key unless you intend to override the
+provider key for the planning model.
 
-## What Sprint 6 deliberately leaves out
+### 3. Create the database and start the server
 
-`POST /runs` runs the graph **synchronously in the request** rather than enqueuing
-it to a background worker (`arq` + Redis, per the original plan). The durable SQLite
-checkpointer already delivers the property that actually matters — a paused run can
-be approved from a separate request or process — without needing Redis running in
-this environment. A real job queue is a drop-in addition once that infra exists: the
-graph and checkpointer don't change, only *who* calls `graph.invoke()`.
+```bash
+mkdir -p artifacts
+make migrate
+make serve
+```
 
-## What Sprint 8 deliberately leaves out
+Open **[http://127.0.0.1:8000/ui/runs](http://127.0.0.1:8000/ui/runs)**.
+Keep the terminal running. Press **Ctrl+C** to stop the server.
 
-- **`test_pass_rate` / `regression_rate`** in `RunMetrics` are always `None`. Measuring
-  them means actually executing a target repository's own test suite — untrusted code,
-  which the "repo content is untrusted data" principle says never runs unsandboxed.
-  That sandbox is Sprint 9's job; faking a pass rate without one would be worse than
-  admitting it isn't measured yet.
-- **Langfuse tracing** isn't wired up — it needs a running Langfuse instance (in
-  `docker-compose.yml`, never started in this environment). `LLMClient.cost_usd` and
-  the hash-chained tool-call log already give per-run cost and a full call sequence
-  without it; swapping in real tracing later doesn't change either.
-- **The feedback loop** (auto-proposing changes to BM25 weights, chunk boundaries,
-  router thresholds, agent prompts from eval results) needs a real history of eval
-  runs to learn from. With only a handful of runs so far, a feedback script would have
-  nothing to propose — worth building once `eval-suite` has actually accumulated data.
-- **A CI gate that fails on metric regression** isn't wired into `.github/workflows/ci.yml`.
-  `make eval` is real and runnable today; gating CI on it needs either `ITP_LLM_PROVIDER=fake`
-  (numbers that don't mean anything for judge scores) or a real provider key held as a
-  CI secret — a deliberate choice for whoever deploys this, not one to make silently here.
+Other useful local URLs:
 
-## What `auto`'s push step deliberately leaves out
+| URL | Purpose |
+| --- | --- |
+| `/ui/runs` | Web app and investigation history |
+| `/docs` | Interactive API documentation |
+| `/openapi.json` | API contract |
 
-- **Never pushes to the repository the issue came from, and never opens a GitHub Pull
-  Request.** The only push target that ever exists is `ITP_PUSH_REMOTE_URL`, which the
-  user sets themselves to a remote they own (e.g. their own fork). There is no fallback
-  remote derived from the snapshot, and no GitHub API call anywhere in the push path.
-- **Push is never implied by approve.** It's a second, separate confirmation (default
-  `No`), only offered after the build step has already succeeded.
-- A real `git push` to a real, network-reachable remote can't be exercised in CI — the
-  test suite proves the actual `SafeGit.run("push", ...)` call end-to-end against a
-  local bare repo (`file://`, a completely realistic networkless transport) instead.
+Restart the server after changing `.env`. `make serve` reloads Python code during
+development, but changes to `.env` do not reliably trigger a reload.
+
+## Use the web app
+
+### Browse issues and read a plan
+
+1. Open the app and enter a GitHub repository URL in the repository browser.
+2. Browse its open issues. Use **Previous** and **Next** for additional pages;
+   pull requests are excluded.
+3. Check the plan status beside the issue:
+
+   | Status | What to do |
+   | --- | --- |
+   | **No plan yet** | Click **Show resolution plan** to generate one. |
+   | **Plan in progress** | Click **View progress** to follow the existing job. |
+   | **Plan ready** | Click **View plan** to read the saved result. |
+   | **Plan failed / interrupted** | Open the status panel and use **Retry**. |
+
+4. Read the problem summary, suggested steps, relevant code, verification ideas,
+   and open questions. Click a code reference to see the saved source excerpt.
+
+Plans are saved in the database. Refreshing the page or returning later restores
+their status. **View plan does not generate another plan.** Use **Regenerate**
+explicitly when you want a new answer against the same saved repository version.
+A failed regeneration keeps the previous successful preview.
+
+Generating a plan does not edit code, create a branch, push changes, or open a PR.
+The first plan for a large repository can take several minutes because the code
+must be downloaded and indexed. Compatible indexes are reused for the same commit.
+
+### Investigate and review a fix
+
+1. Choose **Start investigation** from a ready plan, or use the issue's run action.
+2. The investigation examines evidence and proposes a patch. A plan is treated as
+   provisional guidance, not an established diagnosis.
+3. Review the explanation and the current/modified code comparison for each changed
+   file. A patch can change multiple files when the proposed fix requires it.
+4. Review the validation results and approve or reject the proposed changes.
+5. For an approved, validated patch, optionally **Build branch**, **Push branch**
+   to your fork, and **Create Pull Request**.
+
+Each publishing action is separate. Approval alone does not push changes to GitHub.
+Git push needs working Git credentials; opening a PR needs a GitHub token with
+appropriate access. The UI/API support creating PRs; the CLI `auto` workflow ends
+with its optional push step.
+
+## How it works
+
+| Step | What the application does |
+| --- | --- |
+| **Fetch** | Reads the GitHub issue and discussion. |
+| **Snapshot** | Downloads a repository copy pinned to a specific commit. |
+| **Index** | Splits supported source files into searchable pieces called chunks. |
+| **Retrieve** | Combines keyword search with embedding similarity to select relevant code. |
+| **Plan** | Asks the configured model for a structured, cited starting point. |
+| **Investigate** | Examines evidence, proposes edits, and creates a patch in an isolated working copy. |
+| **Validate and review** | Checks the patch, shows the diff, and waits for a human decision. |
+| **Publish, if requested** | Builds a local branch, pushes to your fork, and can open a PR. |
+
+A **snapshot** is the exact repository version used for the work. Starting an
+investigation from a plan reuses that snapshot and index, so the code does not
+silently change between planning and investigation.
+
+An **embedding** is a numeric representation used to find related code.
+Oversized inputs are split before being sent to the embedding provider; the full
+source text remains stored. Changing between the small and large models triggers
+a rebuild when the saved vector dimensions no longer match.
+
+An investigation can end with:
+
+| Result | Meaning |
+| --- | --- |
+| `PATCH_VALIDATED` | The patch passed the implemented checks and required approval. |
+| `PATCH_REQUIRES_HUMAN_REVIEW` | The result still requires human attention. |
+| `PATCH_REJECTED` | The patch failed a required check or was rejected. |
+| `INVESTIGATION_INCONCLUSIVE` | The investigation could not establish a usable fix. |
+
+Patch checks include whether the patch applies, stays within the allowed file
+scope, and avoids detected secrets or unsupported binary changes. The standard
+workflow does **not** automatically run the target repository's full test suite.
+Verification steps in a resolution plan are suggestions, not executed tests.
+
+## Configuration and API keys
+
+Settings come from `.env` or environment variables prefixed with `ITP_`.
+Environment variables override `.env`. See [.env.example](.env.example) for options.
+
+| Setting | Purpose |
+| --- | --- |
+| `ITP_LLM_PROVIDER` | `openai`, `anthropic`, or `fake`. |
+| `ITP_OPENAI_API_KEY` | OpenAI access for planning and embeddings. |
+| `ITP_ANTHROPIC_API_KEY` | Anthropic access when using that planning provider. |
+| `ITP_LLM_API_KEY` | Optional generic planning key; takes precedence over the provider-specific planning key. |
+| `ITP_LLM_MODEL` | Model that writes plans and reasons about fixes. |
+| `ITP_EMBEDDING_MODEL` | Repository search model. The example configuration uses `text-embedding-3-large`. |
+| `ITP_GITHUB_TOKEN` | GitHub API access, including PR creation. Public issue browsing can work without it, subject to GitHub limits. |
+| `ITP_API_KEY` | A key **you choose** to protect this application's API. It is not an OpenAI or GitHub key. Optional for local use; required in staging/production. |
+| `ITP_PUSH_REMOTE_URL` | Your fork's Git remote, used when pushing a generated branch. |
+| `ITP_AGENT_MODE` | `single` by default; `multi` enables the specialist-agent investigation workflow. |
+| `ITP_DATABASE_URL` | Defaults to `sqlite+pysqlite:///./artifacts/dev.db`. |
+| `ITP_ARTIFACTS_DIR` | Directory for generated files; defaults to `artifacts`. Changing it does not automatically change the database URL. |
+
+If `ITP_API_KEY` is set, enter that same value in the UI's workspace API-key field.
+API clients send it as `Authorization: Bearer <key>`. Plans are scoped to the current
+application identity; separate registered users do not share private plan previews.
+Private repository cloning also requires working Git credentials on the server.
+
+## Saved data and restarts
+
+With the default configuration:
+
+- `artifacts/dev.db` stores plans, indexed code, run records, and application users.
+- `artifacts/checkpoints.db` stores investigation graph checkpoints.
+- `artifacts/issue-plans/` holds planning snapshots.
+- Other directories under `artifacts/` hold run snapshots, patches, and built branches.
+
+Keep both the database and the snapshot files if you want to continue an old plan.
+Deleting a snapshot prevents investigation handoff from that plan.
+
+Use **one API worker**. Planning runs in the server process, not a separate durable
+job queue. Completed plans survive restarts; unfinished plans are marked interrupted
+and can be retried. `make serve` is a development server, not a production deployment.
+
+To completely reset **default local storage**, stop the server and run these commands
+from the project root. This deletes local plans, runs, users, snapshots, indexes,
+checkpoints, and patches. It keeps source code and `.env`, and does not change GitHub.
+
+```bash
+rm -rf -- artifacts
+mkdir -p artifacts
+make migrate
+make serve
+```
+
+Custom database URLs or artifact directories need their own reset procedure.
+
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| Plan fails with missing API credits or quota | Resolve billing/quota for the configured API account, then click **Retry**. Changing models does not provide credits. |
+| FakeLLM reports no queued response | Set a real `ITP_LLM_PROVIDER` and its API key for live planning. FakeLLM is a test stub. |
+| Plan takes several minutes | The first request may be cloning and embedding a large repository. Open **View progress**; repeated generation is unnecessary. |
+| Plan says interrupted | Restarting the server stops its background jobs. Use **Retry**. |
+| Unauthorized / HTTP 401 | Check the workspace API key. It must match the server's `ITP_API_KEY` or a valid registered user's key. |
+| Repository not found or clone fails | Check the URL, repository access, and server Git credentials. |
+| Embedding dimensions changed | The saved embeddings must be rebuilt. Keep available provider quota and allow the refresh to finish. |
+| Missing table after an update | Stop the server, run `make migrate`, then restart. Back up existing data before resetting it. |
+
+The development terminal shows server logs. Failure messages identify the stage;
+server logs include the plan ID and error type. Opening an existing plan does not
+need a new model call.
+
+## Try the offline demo
+
+```bash
+make demo
+```
+
+This creates a temporary calculator repository with a bug and applies a predefined
+edit plan. It demonstrates patch creation and validation without calling an LLM.
+It does not demonstrate live AI diagnosis.
+
+## Development commands
+
+| Command | Purpose |
+| --- | --- |
+| `make install` | Install Python and dependencies. |
+| `make migrate` | Apply database migrations. |
+| `make serve` | Start the local web app. |
+| `make check` | Run lint, type checks, and tests with coverage. |
+| `uv run ruff format --check .` | Check formatting, as CI does. |
+| `make openapi` | Regenerate the committed API contract after changing endpoints. |
+| `make eval` | Run retrieval evaluation using the labeled dataset. |
+| `make up` / `make down` | Start/stop optional Docker development services. |
+
+For the interactive command-line workflow:
+
+```bash
+uv run issue-to-patch auto https://github.com/OWNER/REPO/issues/123
+```
+
+Replace the example URL with a real issue. Use `uv run issue-to-patch --help` for
+individual ingestion, indexing, search, investigation, and audit commands.
+
+## Code and further reading
+
+| Directory | Responsibility |
+| --- | --- |
+| `src/issue_to_patch/api/` | Web UI and HTTP endpoints. |
+| `src/issue_to_patch/ingestion/` | GitHub data and repository snapshots. |
+| `src/issue_to_patch/processing/` | Parsing, chunking, and indexing. |
+| `src/issue_to_patch/retrieval/` | Keyword and embedding search. |
+| `src/issue_to_patch/planning/` | Saved, read-only resolution plans. |
+| `src/issue_to_patch/graph/` and `agents/` | Investigation flow and reasoning. |
+| `src/issue_to_patch/patching/` | Patch creation, checks, branches, and pushing. |
+| `src/issue_to_patch/persistence/` | Stored data and migrations. |
+| `tests/` | Automated tests using fake model responses. |
+
+- [Project guide in simple language](docs/project-guide.md)
+- [Resolution-plan workflow and API](docs/issue-plans.md)
+- [Implementation roadmap](IMPLEMENTATION_PLAN.md)
+- [Learning notes](RAG_LEARNING_PLAN.md)
+- [Evaluation dataset and results](evals/README.md)
